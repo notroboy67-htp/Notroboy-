@@ -6,12 +6,14 @@ set -Eeuo pipefail
 #              NRB SKYPORT PANEL INSTALLER
 # ============================================================
 
-PANEL_NAME="Skyport Panel"
-PANEL_DIR="/opt/skyport"
-PANEL_USER="skyport"
+SKYPORT_DIR="/opt/skyport"
+SKYPORT_USER="skyport"
 SERVICE_NAME="skyport"
-REPO_URL="https://github.com/skyport-team/panel.git"
-NODE_MAJOR="22"
+SKYPORT_REPO="https://github.com/skyport-team/panel.git"
+
+NODE_VERSION="22.20.0"
+NODE_ARCH="linux-x64"
+NODE_DIR="/opt/nodejs"
 
 # ============================================================
 # COLORS
@@ -45,298 +47,252 @@ die() {
     exit 1
 }
 
-# ============================================================
-# ERROR HANDLER
-# ============================================================
-
-trap 'error "Installation failed at line $LINENO."; error "Check the output above for the actual error."' ERR
+trap 'error "Installer failed at line $LINENO."' ERR
 
 # ============================================================
 # BANNER
 # ============================================================
 
-clear || true
+clear 2>/dev/null || true
 
 echo
 echo "============================================================"
 echo "              NRB SKYPORT PANEL INSTALLER"
 echo "============================================================"
 echo
-echo " Panel       : Skyport"
-echo " Repository  : $REPO_URL"
-echo " Directory   : $PANEL_DIR"
-echo " Service     : $SERVICE_NAME"
-echo " Node.js     : $NODE_MAJOR LTS"
+echo " Repository : $SKYPORT_REPO"
+echo " Directory  : $SKYPORT_DIR"
+echo " Node.js    : $NODE_VERSION"
 echo
 echo "============================================================"
 echo
 
 # ============================================================
-# ROOT CHECK
+# ROOT
 # ============================================================
 
 if [ "$(id -u)" -ne 0 ]; then
-    die "Run this installer as root."
+    exec sudo bash "$0" "$@"
 fi
 
 success "Running as root."
 
 # ============================================================
-# OS CHECK
+# CHECK REQUIRED COMMANDS
 # ============================================================
 
-if [ ! -f /etc/os-release ]; then
-    die "Cannot detect operating system."
+echo
+info "Checking required commands..."
+
+MISSING=()
+
+for CMD in git curl tar; do
+    if ! command -v "$CMD" >/dev/null 2>&1; then
+        MISSING+=("$CMD")
+    else
+        success "$CMD is already installed."
+    fi
+done
+
+# ============================================================
+# ONLY USE APT IF SOMETHING IS ACTUALLY MISSING
+# ============================================================
+
+if [ "${#MISSING[@]}" -gt 0 ]; then
+
+    warning "Missing commands: ${MISSING[*]}"
+
+    echo
+    info "Installing only missing packages..."
+
+    # IMPORTANT:
+    # Do not blindly reinstall git.
+    # This avoids the cross-device dpkg error seen in Codespaces.
+
+    apt-get update -y
+
+    for PACKAGE in "${MISSING[@]}"; do
+        case "$PACKAGE" in
+            git)
+                apt-get install -y git
+                ;;
+            curl)
+                apt-get install -y curl
+                ;;
+            tar)
+                apt-get install -y tar
+                ;;
+        esac
+    done
+
 fi
-
-source /etc/os-release
-
-info "Operating system: ${PRETTY_NAME:-Unknown}"
-
-case "${ID:-}" in
-    debian|ubuntu)
-        success "Supported Debian-based operating system detected."
-        ;;
-    *)
-        warning "This installer is designed for Debian/Ubuntu."
-        read -r -p "Continue anyway? [y/N]: " ANSWER
-
-        if [[ ! "$ANSWER" =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
-        ;;
-esac
-
-# ============================================================
-# STOP OLD SKYPORT SERVICE
-# ============================================================
-
-if systemctl list-unit-files 2>/dev/null | grep -q "^${SERVICE_NAME}.service"; then
-    info "Stopping existing Skyport service..."
-
-    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-    systemctl disable "$SERVICE_NAME" 2>/dev/null || true
-fi
-
-# ============================================================
-# REPAIR APT / DPKG
-# ============================================================
-
-echo
-echo "============================================================"
-echo "             REPAIRING APT / DPKG"
-echo "============================================================"
-echo
-
-info "Checking dpkg status..."
-
-dpkg --configure -a || true
-
-info "Repairing broken dependencies..."
-
-apt-get -f install -y || true
-
-info "Cleaning package cache..."
-
-apt-get clean || true
-
-info "Updating package lists..."
-
-apt-get update -y
-
-success "APT/Dpkg preparation complete."
-
-# ============================================================
-# INSTALL BASIC PACKAGES
-# ============================================================
-
-echo
-echo "============================================================"
-echo "             INSTALLING SYSTEM PACKAGES"
-echo "============================================================"
-echo
-
-info "Installing required packages..."
-
-DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    ca-certificates \
-    curl \
-    wget \
-    gnupg \
-    lsb-release \
-    apt-transport-https \
-    build-essential \
-    git \
-    unzip \
-    tar
-
-success "System packages installed."
 
 # ============================================================
 # VERIFY GIT
 # ============================================================
 
-if ! command -v git >/dev/null 2>&1; then
-    die "Git installation failed."
-fi
+command -v git >/dev/null 2>&1 || die "Git is required."
 
+echo
 info "Git version:"
 git --version
 
 # ============================================================
-# INSTALL NODE.JS
+# NODE.JS
 # ============================================================
 
 echo
 echo "============================================================"
-echo "              INSTALLING NODE.JS"
+echo "                 NODE.JS SETUP"
 echo "============================================================"
 echo
 
-CURRENT_NODE=""
+NODE_OK=false
 
 if command -v node >/dev/null 2>&1; then
+
     CURRENT_NODE="$(node -v | sed 's/^v//' | cut -d. -f1)"
-fi
 
-if [ -n "$CURRENT_NODE" ] && [ "$CURRENT_NODE" = "$NODE_MAJOR" ]; then
-
-    success "Node.js $NODE_MAJOR is already installed."
-
-else
-
-    info "Installing Node.js $NODE_MAJOR LTS..."
-
-    # Remove conflicting old NodeSource configuration
-    rm -f /etc/apt/sources.list.d/nodesource.list
-    rm -f /etc/apt/keyrings/nodesource.gpg
-
-    # Install NodeSource setup
-    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
-
-    apt-get update -y
-
-    DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
-
-fi
-
-# ============================================================
-# VERIFY NODE
-# ============================================================
-
-if ! command -v node >/dev/null 2>&1; then
-    die "Node.js installation failed."
-fi
-
-if ! command -v npm >/dev/null 2>&1; then
-    die "NPM installation failed."
-fi
-
-NODE_VERSION="$(node -v)"
-NPM_VERSION="$(npm -v)"
-
-echo
-info "Node.js : $NODE_VERSION"
-info "NPM     : $NPM_VERSION"
-echo
-
-# ============================================================
-# CREATE SKYPORT USER
-# ============================================================
-
-echo
-echo "============================================================"
-echo "             CREATING SKYPORT USER"
-echo "============================================================"
-echo
-
-if id "$PANEL_USER" >/dev/null 2>&1; then
-    success "User '$PANEL_USER' already exists."
-else
-    useradd \
-        --system \
-        --home-dir "$PANEL_DIR" \
-        --create-home \
-        --shell /usr/sbin/nologin \
-        "$PANEL_USER"
-
-    success "Created user '$PANEL_USER'."
-fi
-
-# ============================================================
-# PREPARE INSTALL DIRECTORY
-# ============================================================
-
-info "Preparing $PANEL_DIR..."
-
-if [ -d "$PANEL_DIR" ]; then
-
-    if [ -d "$PANEL_DIR/.git" ]; then
-
-        info "Existing Skyport repository detected."
-
-        cd "$PANEL_DIR"
-
-        git fetch --all
-
-        git reset --hard origin/HEAD || true
-
-        git pull --ff-only || true
-
+    if [ "$CURRENT_NODE" = "22" ]; then
+        NODE_OK=true
+        success "Node.js 22 is already installed."
     else
-
-        warning "Existing directory is not a Git repository."
-
-        mv "$PANEL_DIR" "${PANEL_DIR}.backup.$(date +%s)"
-
-        git clone "$REPO_URL" "$PANEL_DIR"
+        warning "Existing Node.js version is not 22."
     fi
 
+fi
+
+if [ "$NODE_OK" = false ]; then
+
+    info "Installing Node.js $NODE_VERSION..."
+
+    TMP_DIR="$(mktemp -d)"
+    NODE_TAR="$TMP_DIR/node.tar.xz"
+
+    NODE_URL="https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-${NODE_ARCH}.tar.xz"
+
+    curl -fL "$NODE_URL" -o "$NODE_TAR"
+
+    rm -rf "$NODE_DIR"
+
+    mkdir -p "$NODE_DIR"
+
+    tar -xJf "$NODE_TAR" \
+        --strip-components=1 \
+        -C "$NODE_DIR"
+
+    ln -sf "$NODE_DIR/bin/node" /usr/local/bin/node
+    ln -sf "$NODE_DIR/bin/npm" /usr/local/bin/npm
+    ln -sf "$NODE_DIR/bin/npx" /usr/local/bin/npx
+    ln -sf "$NODE_DIR/bin/corepack" /usr/local/bin/corepack 2>/dev/null || true
+
+    rm -rf "$TMP_DIR"
+
+    success "Node.js installed."
+
+fi
+
+export PATH="/usr/local/bin:$NODE_DIR/bin:$PATH"
+
+echo
+info "Node.js: $(node --version)"
+info "NPM:     $(npm --version)"
+
+# ============================================================
+# SKYPORT DIRECTORY
+# ============================================================
+
+echo
+echo "============================================================"
+echo "                 SKYPORT INSTALLATION"
+echo "============================================================"
+echo
+
+if [ -d "$SKYPORT_DIR/.git" ]; then
+
+    info "Existing Skyport installation detected."
+
+    cd "$SKYPORT_DIR"
+
+    git fetch --all
+
+    success "Skyport repository found."
+
 else
 
-    git clone "$REPO_URL" "$PANEL_DIR"
+    if [ -d "$SKYPORT_DIR" ]; then
+        warning "$SKYPORT_DIR exists but is not a Git repository."
+
+        BACKUP="${SKYPORT_DIR}.backup.$(date +%s)"
+
+        mv "$SKYPORT_DIR" "$BACKUP"
+
+        info "Old directory moved to:"
+        echo "$BACKUP"
+    fi
+
+    info "Cloning Skyport..."
+
+    mkdir -p "$(dirname "$SKYPORT_DIR")"
+
+    git clone "$SKYPORT_REPO" "$SKYPORT_DIR"
+
+    cd "$SKYPORT_DIR"
+
+    success "Skyport cloned successfully."
 
 fi
 
-cd "$PANEL_DIR"
-
-success "Skyport source downloaded."
-
 # ============================================================
-# SHOW PROJECT FILES
+# PACKAGE.JSON
 # ============================================================
 
-if [ ! -f "$PANEL_DIR/package.json" ]; then
-    die "Skyport package.json was not found."
+if [ ! -f "$SKYPORT_DIR/package.json" ]; then
+    die "package.json was not found in the Skyport repository."
 fi
 
-success "Skyport package.json found."
+success "Skyport package.json detected."
 
 # ============================================================
 # NPM INSTALL
 # ============================================================
 
 echo
+info "Installing Skyport npm dependencies..."
+
+cd "$SKYPORT_DIR"
+
+npm install
+
+success "NPM dependencies installed."
+
+# ============================================================
+# CREATE USER
+# ============================================================
+
+echo
 echo "============================================================"
-echo "             INSTALLING SKYPORT DEPENDENCIES"
+echo "                 SKYPORT USER"
 echo "============================================================"
 echo
 
-info "Running npm install..."
+if id "$SKYPORT_USER" >/dev/null 2>&1; then
 
-npm install --production=false
+    success "User '$SKYPORT_USER' already exists."
 
-success "Skyport dependencies installed."
+else
 
-# ============================================================
-# OWNERSHIP
-# ============================================================
+    useradd \
+        --system \
+        --home "$SKYPORT_DIR" \
+        --shell /usr/sbin/nologin \
+        "$SKYPORT_USER"
 
-info "Setting Skyport ownership..."
+    success "Created user '$SKYPORT_USER'."
 
-chown -R "$PANEL_USER:$PANEL_USER" "$PANEL_DIR"
+fi
 
-success "Ownership configured."
+chown -R "$SKYPORT_USER:$SKYPORT_USER" "$SKYPORT_DIR"
 
 # ============================================================
 # CREATE SYSTEMD SERVICE
@@ -344,115 +300,87 @@ success "Ownership configured."
 
 echo
 echo "============================================================"
-echo "              CREATING SYSTEMD SERVICE"
+echo "                 SYSTEMD SETUP"
 echo "============================================================"
 echo
 
-cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
+if command -v systemctl >/dev/null 2>&1 && \
+   [ -d /run/systemd/system ]; then
+
+    info "systemd detected."
+
+    cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
 Description=Skyport Panel
-Documentation=https://github.com/skyport-team/panel
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 
-User=${PANEL_USER}
-Group=${PANEL_USER}
+User=${SKYPORT_USER}
+Group=${SKYPORT_USER}
 
-WorkingDirectory=${PANEL_DIR}
-
-ExecStart=/usr/bin/node .
+WorkingDirectory=${SKYPORT_DIR}
 
 Environment=NODE_ENV=production
+Environment=PATH=/usr/local/bin:/opt/nodejs/bin:/usr/bin:/bin
+
+ExecStart=/usr/local/bin/node .
 
 Restart=always
 RestartSec=5
-
-TimeoutStartSec=60
-TimeoutStopSec=30
 
 LimitNOFILE=65535
 
 StandardOutput=journal
 StandardError=journal
 
-NoNewPrivileges=true
-
 [Install]
 WantedBy=multi-user.target
 EOF
 
-success "Systemd service created."
+    systemctl daemon-reload
 
-# ============================================================
-# ENABLE SERVICE
-# ============================================================
+    systemctl enable "$SERVICE_NAME"
 
-info "Reloading systemd..."
+    systemctl restart "$SERVICE_NAME"
 
-systemctl daemon-reload
+    sleep 5
 
-info "Enabling Skyport at boot..."
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
 
-systemctl enable "$SERVICE_NAME"
+        success "Skyport systemd service is running."
 
-success "Skyport enabled at boot."
+        SYSTEMD_OK=true
 
-# ============================================================
-# START SERVICE
-# ============================================================
+    else
 
-echo
-echo "============================================================"
-echo "              STARTING SKYPORT PANEL"
-echo "============================================================"
-echo
+        SYSTEMD_OK=false
 
-systemctl restart "$SERVICE_NAME"
+        warning "Skyport service did not start."
 
-sleep 5
+        echo
+        journalctl \
+            -u "$SERVICE_NAME" \
+            -n 80 \
+            --no-pager || true
+        echo
 
-# ============================================================
-# SERVICE CHECK
-# ============================================================
-
-if systemctl is-active --quiet "$SERVICE_NAME"; then
-
-    success "Skyport service is running."
+    fi
 
 else
 
-    error "Skyport failed to start."
+    SYSTEMD_OK=false
 
-    echo
-    echo "Last Skyport logs:"
-    echo "------------------------------------------------------------"
+    warning "systemd is not available in this environment."
 
-    journalctl \
-        -u "$SERVICE_NAME" \
-        -n 80 \
-        --no-pager || true
+    warning "This looks like a container/Codespace environment."
 
-    echo "------------------------------------------------------------"
-    echo
-
-    die "Skyport installation completed but the service failed to start."
 fi
 
 # ============================================================
-# DETECT SERVER IP
-# ============================================================
-
-SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-
-if [ -z "$SERVER_IP" ]; then
-    SERVER_IP="YOUR_SERVER_IP"
-fi
-
-# ============================================================
-# FINAL STATUS
+# FINAL
 # ============================================================
 
 echo
@@ -460,37 +388,52 @@ echo "============================================================"
 echo "             SKYPORT INSTALLATION COMPLETE"
 echo "============================================================"
 echo
-echo " Panel Directory : $PANEL_DIR"
-echo " Service         : $SERVICE_NAME"
-echo " Node.js         : $NODE_VERSION"
-echo " NPM             : $NPM_VERSION"
-echo " Status          : RUNNING"
-echo
-echo " Server IP       : $SERVER_IP"
-echo
-echo "============================================================"
-echo "                  MANAGEMENT COMMANDS"
-echo "============================================================"
-echo
-echo " Status:"
-echo "   systemctl status skyport"
-echo
-echo " Start:"
-echo "   systemctl start skyport"
-echo
-echo " Stop:"
-echo "   systemctl stop skyport"
-echo
-echo " Restart:"
-echo "   systemctl restart skyport"
-echo
-echo " Logs:"
-echo "   journalctl -u skyport -f"
-echo
-echo " Last 100 logs:"
-echo "   journalctl -u skyport -n 100 --no-pager"
-echo
-echo "============================================================"
+
+echo "Skyport directory:"
+echo "  $SKYPORT_DIR"
 echo
 
-success "Skyport Panel installation finished."
+echo "Node.js:"
+node --version
+
+echo
+echo "NPM:"
+npm --version
+
+echo
+
+if [ "${SYSTEMD_OK:-false}" = true ]; then
+
+    echo "Service:"
+    echo "  skyport"
+    echo
+    echo "Status:"
+    echo "  RUNNING"
+    echo
+    echo "Commands:"
+    echo
+    echo "  systemctl status skyport"
+    echo "  systemctl restart skyport"
+    echo "  systemctl stop skyport"
+    echo "  systemctl start skyport"
+    echo
+    echo "Logs:"
+    echo
+    echo "  journalctl -u skyport -f"
+
+else
+
+    echo "Systemd:"
+    echo "  NOT AVAILABLE"
+    echo
+    echo "Run Skyport manually with:"
+    echo
+    echo "  cd $SKYPORT_DIR"
+    echo "  node ."
+
+fi
+
+echo
+echo "============================================================"
+echo
+success "Installation finished."
