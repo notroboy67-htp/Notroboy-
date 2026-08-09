@@ -4,11 +4,11 @@ set -Eeuo pipefail
 # ============================================================
 #                     NRB HOSTING INSTALLER
 # ============================================================
-# One-click menu for:
+# One-click menu:
 # 1) Pterodactyl
 # 2) PufferPanel
-# 3) Skyport Panel
-# 4) No-KVM / QEMU VM Installer
+# 3) Panel V1
+# 4) NRB No-KVM / QEMU VM Installer
 # 5) Service Start / Stop / Status
 # 6) Uninstall / Repair
 # 7) Exit
@@ -17,7 +17,7 @@ set -Eeuo pipefail
 # NRB INSTALLATION COMMANDS — EDIT THESE ONLY
 # ============================================================
 
-PTERODACTYL_COMMAND='bash <(curl -s https://ptero.jishnu.site)'
+PTERODACTYL_COMMAND='bash <(curl -fsSL https://ptero.jishnu.site)'
 
 PUFFERPANEL_COMMAND='
 curl -fsSL https://packagecloud.io/install/repositories/pufferpanel/pufferpanel/script.deb.sh?any=true | bash
@@ -26,8 +26,7 @@ apt-get install -y pufferpanel
 systemctl enable --now pufferpanel
 '
 
-MCPANEL_COMMAND='bash <(curl -fsSL https://raw.githubusercontent.com/notroboy67-htp/panel/refs/heads/main/install-1.sh)
-'
+PANEL_V1_COMMAND='bash <(curl -fsSL https://raw.githubusercontent.com/notroboy67-htp/panel/refs/heads/main/install-1.sh)'
 
 NOKVM_COMMAND='bash <(curl -fsSL https://raw.githubusercontent.com/notroboy67-htp/VMS/refs/heads/main/nokvm.sh)'
 
@@ -44,9 +43,6 @@ WHITE='\033[1;37m'
 NC='\033[0m'
 
 SCRIPT_NAME="NOTROBOY Installer"
-SKYPORT_DIR="/opt/skyport"
-SKYPORT_LOG="/var/log/nrb-skyport.log"
-SKYPORT_PID="/var/run/nrb-skyport.pid"
 
 banner() {
     clear 2>/dev/null || true
@@ -88,16 +84,15 @@ require_root() {
 }
 
 check_network() {
+    command -v curl >/dev/null 2>&1 || {
+        error "curl is not installed."
+        return 1
+    }
+
     curl -fsSI --max-time 10 https://github.com >/dev/null 2>&1 || {
         error "Internet connectivity check failed."
         return 1
     }
-}
-
-apt_base() {
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y curl wget git ca-certificates gnupg
 }
 
 run_command() {
@@ -114,7 +109,7 @@ install_pterodactyl() {
     echo
     printf '%b\n' "${WHITE}PTERODACTYL${NC}"
     echo
-    info "Running the Pterodactyl command you supplied:"
+    info "Running the Pterodactyl command:"
     echo "  $PTERODACTYL_COMMAND"
     echo
 
@@ -140,16 +135,16 @@ install_pufferpanel() {
 
     check_network || { pause; return; }
 
-    info "Installing PufferPanel using the package installation method."
+    info "Installing PufferPanel."
     echo
 
     if run_command "$PUFFERPANEL_COMMAND"; then
-        success "PufferPanel package installation completed."
+        success "PufferPanel installation completed."
         echo
         info "Create the first administrator with:"
         echo "  pufferpanel user add"
         echo
-        info "The panel service is:"
+        info "Service:"
         echo "  systemctl status pufferpanel"
         echo
         info "Default web port: 8080"
@@ -161,134 +156,34 @@ install_pufferpanel() {
 }
 
 # ============================================================
-#                      INSTALL: MCPANEL
+#                       INSTALL: PANEL V1
 # ============================================================
 
-install_skyport() {
+install_panel_v1() {
     banner
     echo
-    printf '%b\n' "${WHITE}SKYPORT PANEL${NC}"
+    printf '%b\n' "${WHITE}PANEL V1${NC}"
     echo
 
     check_network || { pause; return; }
-    apt_base || {
-        error "Base package installation failed."
-        pause
-        return
-    }
 
-    # Node/npm are required by the supplied Skyport procedure.
-    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-        info "Node.js/npm not found. Installing Node.js 20..."
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - || {
-            error "NodeSource setup failed."
-            pause
-            return
-        }
-        apt-get install -y nodejs || {
-            error "Node.js installation failed."
-            pause
-            return
-        }
-    fi
-
-    info "Node.js: $(node -v)"
-    info "npm: $(npm -v)"
+    info "Starting Panel V1 installation..."
+    echo
+    info "Running:"
+    echo "  $PANEL_V1_COMMAND"
     echo
 
-    # Use a fixed directory so the installer can manage start/stop/status.
-    if [[ -d "$SKYPORT_DIR/.git" ]]; then
-        info "Existing Skyport repository found at $SKYPORT_DIR."
-        read -rp "Pull latest changes? [y/N]: " answer
-        if [[ "$answer" =~ ^[Yy]$ ]]; then
-            git -C "$SKYPORT_DIR" pull --ff-only || {
-                error "Skyport git pull failed."
-                pause
-                return
-            }
-        fi
-    elif [[ -e "$SKYPORT_DIR" ]]; then
-        error "$SKYPORT_DIR exists and is not a Git repository."
-        pause
-        return
+    if run_command "$PANEL_V1_COMMAND"; then
+        success "Panel V1 installation completed."
     else
-        info "Cloning $SKYPORT_REPO ..."
-        git clone "$SKYPORT_REPO" "$SKYPORT_DIR" || {
-            error "Skyport clone failed."
-            pause
-            return
-        }
+        error "Panel V1 installer returned an error."
     fi
 
-    [[ -f "$SKYPORT_DIR/package.json" ]] || {
-        error "Skyport package.json was not found."
-        pause
-        return
-    }
-
-    info "Installing project dependencies..."
-    (cd "$SKYPORT_DIR" && npm install) || {
-        error "npm install failed."
-        pause
-        return
-    }
-
-    info "Seeding database/images..."
-    (cd "$SKYPORT_DIR" && npm run seed) || {
-        error "npm run seed failed."
-        pause
-        return
-    }
-
-    echo
-    info "Creating the Skyport administrator."
-    info "Answer the prompts from npm run createUser."
-    (cd "$SKYPORT_DIR" && npm run createUser) || {
-        error "npm run createUser failed or was cancelled."
-        pause
-        return
-    }
-
-    # The requested "node ." command is started in the background so the
-    # NRB menu remains usable. Output is preserved in a log.
-    info "Starting Skyport with node . ..."
-    rm -f "$SKYPORT_PID"
-    touch "$SKYPORT_LOG"
-    chmod 600 "$SKYPORT_LOG"
-
-    (
-        cd "$SKYPORT_DIR"
-        nohup node . >>"$SKYPORT_LOG" 2>&1 &
-        echo $! >"$SKYPORT_PID"
-    )
-
-    sleep 3
-
-    local pid=""
-    pid="$(cat "$SKYPORT_PID" 2>/dev/null || true)"
-
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        success "Skyport is running. PID: $pid"
-    else
-        error "Skyport did not remain running."
-        echo
-        warn "Last Skyport log output:"
-        tail -n 50 "$SKYPORT_LOG" 2>/dev/null || true
-        pause
-        return
-    fi
-
-    echo
-    info "Skyport installation sequence:"
-    printf '%s\n' "$SKYPORT_COMMAND"
-    echo
-    info "Skyport directory: $SKYPORT_DIR"
-    info "Skyport log:       $SKYPORT_LOG"
     pause
 }
 
 # ============================================================
-#                    INSTALL: NO-KVM
+#                    INSTALL: NO-KVM / QEMU
 # ============================================================
 
 install_nokvm() {
@@ -296,7 +191,7 @@ install_nokvm() {
     echo
     printf '%b\n' "${WHITE}NRB NO-KVM / QEMU VM INSTALLER${NC}"
     echo
-    info "Running the NRB No-KVM installer:"
+    info "Running:"
     echo "  $NOKVM_COMMAND"
     echo
 
@@ -314,97 +209,76 @@ install_nokvm() {
 #                   SERVICE MANAGEMENT
 # ============================================================
 
-skyport_status() {
-    local pid=""
-    pid="$(cat "$SKYPORT_PID" 2>/dev/null || true)"
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        success "Skyport: RUNNING (PID $pid)"
-    else
-        warn "Skyport: STOPPED"
-    fi
-}
-
-skyport_start() {
-    if [[ ! -d "$SKYPORT_DIR" ]]; then
-        error "Skyport is not installed at $SKYPORT_DIR."
-        return 1
-    fi
-
-    if [[ -f "$SKYPORT_PID" ]]; then
-        local old_pid=""
-        old_pid="$(cat "$SKYPORT_PID" 2>/dev/null || true)"
-        if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
-            warn "Skyport is already running (PID $old_pid)."
-            return 0
-        fi
-    fi
-
-    touch "$SKYPORT_LOG"
-    (
-        cd "$SKYPORT_DIR"
-        nohup node . >>"$SKYPORT_LOG" 2>&1 &
-        echo $! >"$SKYPORT_PID"
-    )
-    sleep 2
-    skyport_status
-}
-
-skyport_stop() {
-    if [[ ! -f "$SKYPORT_PID" ]]; then
-        warn "Skyport PID file not found."
-        return 0
-    fi
-
-    local pid=""
-    pid="$(cat "$SKYPORT_PID" 2>/dev/null || true)"
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" 2>/dev/null || true
-        sleep 2
-        kill -9 "$pid" 2>/dev/null || true
-        success "Skyport stopped."
-    else
-        warn "Skyport is not running."
-    fi
-    rm -f "$SKYPORT_PID"
-}
-
 service_menu() {
     while true; do
         banner
         echo
         printf '%b\n' "${WHITE}SERVICE START / STOP / STATUS${NC}"
         echo
-        echo "1) Skyport Start"
-        echo "2) Skyport Stop"
-        echo "3) Skyport Status"
-        echo "4) PufferPanel Start"
-        echo "5) PufferPanel Stop"
-        echo "6) PufferPanel Status"
-        echo "7) Docker Start"
-        echo "8) Docker Stop"
-        echo "9) Docker Status"
-        echo "10) Return"
+        echo "1) PufferPanel Start"
+        echo "2) PufferPanel Stop"
+        echo "3) PufferPanel Status"
+        echo "4) Docker Start"
+        echo "5) Docker Stop"
+        echo "6) Docker Status"
+        echo "7) Return"
         echo
         read -rp "Select an option: " choice
 
         case "$choice" in
-            1) skyport_start; pause ;;
-            2) skyport_stop; pause ;;
-            3) skyport_status; pause ;;
-            4) systemctl start pufferpanel 2>/dev/null && success "PufferPanel started." || error "Could not start PufferPanel."; pause ;;
-            5) systemctl stop pufferpanel 2>/dev/null && success "PufferPanel stopped." || error "Could not stop PufferPanel."; pause ;;
-            6) systemctl --no-pager status pufferpanel 2>/dev/null || true; pause ;;
-            7) systemctl start docker 2>/dev/null && success "Docker started." || error "Could not start Docker."; pause ;;
-            8) systemctl stop docker 2>/dev/null && success "Docker stopped." || error "Could not stop Docker."; pause ;;
-            9) systemctl --no-pager status docker 2>/dev/null || true; pause ;;
-            10) return ;;
-            *) warn "Invalid option."; sleep 1 ;;
+            1)
+                if systemctl start pufferpanel 2>/dev/null; then
+                    success "PufferPanel started."
+                else
+                    error "Could not start PufferPanel."
+                fi
+                pause
+                ;;
+            2)
+                if systemctl stop pufferpanel 2>/dev/null; then
+                    success "PufferPanel stopped."
+                else
+                    error "Could not stop PufferPanel."
+                fi
+                pause
+                ;;
+            3)
+                systemctl --no-pager status pufferpanel 2>/dev/null || true
+                pause
+                ;;
+            4)
+                if systemctl start docker 2>/dev/null; then
+                    success "Docker started."
+                else
+                    error "Could not start Docker."
+                fi
+                pause
+                ;;
+            5)
+                if systemctl stop docker 2>/dev/null; then
+                    success "Docker stopped."
+                else
+                    error "Could not stop Docker."
+                fi
+                pause
+                ;;
+            6)
+                systemctl --no-pager status docker 2>/dev/null || true
+                pause
+                ;;
+            7)
+                return
+                ;;
+            *)
+                warn "Invalid option."
+                sleep 1
+                ;;
         esac
     done
 }
 
 # ============================================================
-#                     REPAIR / UNINSTALL
+#                    UNINSTALL / REPAIR
 # ============================================================
 
 repair_menu() {
@@ -414,11 +288,9 @@ repair_menu() {
         printf '%b\n' "${WHITE}UNINSTALL / REPAIR${NC}"
         echo
         echo "1) Repair PufferPanel"
-        echo "2) Repair Skyport"
-        echo "3) Restart all selected services"
-        echo "4) Uninstall PufferPanel"
-        echo "5) Uninstall Skyport"
-        echo "6) Return"
+        echo "2) Restart PufferPanel"
+        echo "3) Uninstall PufferPanel"
+        echo "4) Return"
         echo
         read -rp "Select an option: " choice
 
@@ -431,25 +303,11 @@ repair_menu() {
                 pause
                 ;;
             2)
-                if [[ -d "$SKYPORT_DIR/.git" ]]; then
-                    git -C "$SKYPORT_DIR" pull --ff-only || true
-                    (cd "$SKYPORT_DIR" && npm install) || true
-                    skyport_stop || true
-                    skyport_start || true
-                    success "Skyport repair attempt completed."
-                else
-                    error "Skyport installation not found."
-                fi
+                systemctl restart pufferpanel 2>/dev/null || true
+                success "PufferPanel restart attempted."
                 pause
                 ;;
             3)
-                systemctl restart pufferpanel 2>/dev/null || true
-                skyport_stop || true
-                skyport_start || true
-                success "Restart attempt completed."
-                pause
-                ;;
-            4)
                 read -rp "Uninstall PufferPanel? [y/N]: " answer
                 if [[ "$answer" =~ ^[Yy]$ ]]; then
                     systemctl disable --now pufferpanel 2>/dev/null || true
@@ -460,20 +318,13 @@ repair_menu() {
                 fi
                 pause
                 ;;
-            5)
-                read -rp "Delete Skyport from $SKYPORT_DIR and its logs? [y/N]: " answer
-                if [[ "$answer" =~ ^[Yy]$ ]]; then
-                    skyport_stop || true
-                    rm -rf "$SKYPORT_DIR"
-                    rm -f "$SKYPORT_LOG" "$SKYPORT_PID"
-                    success "Skyport files removed."
-                else
-                    info "Cancelled."
-                fi
-                pause
+            4)
+                return
                 ;;
-            6) return ;;
-            *) warn "Invalid option."; sleep 1 ;;
+            *)
+                warn "Invalid option."
+                sleep 1
+                ;;
         esac
     done
 }
@@ -490,7 +341,7 @@ main_menu() {
         echo
         echo "1) Pterodactyl"
         echo "2) PufferPanel"
-        echo "3) Skyport Panel"
+        echo "3) Panel V1"
         echo "4) NRB No-KVM / QEMU VM Installer"
         echo "5) Service Start / Stop / Status"
         echo "6) Uninstall / Repair"
@@ -501,7 +352,7 @@ main_menu() {
         case "$choice" in
             1) install_pterodactyl ;;
             2) install_pufferpanel ;;
-            3) install_skyport ;;
+            3) install_panel_v1 ;;
             4) install_nokvm ;;
             5) service_menu ;;
             6) repair_menu ;;
@@ -510,7 +361,10 @@ main_menu() {
                 success "Thank you for using NOTROBOY Installer."
                 exit 0
                 ;;
-            *) warn "Invalid option. Please choose 1-7."; sleep 1 ;;
+            *)
+                warn "Invalid option. Please choose 1-7."
+                sleep 1
+                ;;
         esac
     done
 }
