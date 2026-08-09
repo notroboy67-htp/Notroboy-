@@ -26,7 +26,7 @@ apt-get install -y pufferpanel
 systemctl enable --now pufferpanel
 '
 
-SKYPORT_COMMAND='bash <(curl -fsSL https://raw.githubusercontent.com/skyportlabs/panel/main/install.sh)
+mcpanel_COMMAND='bash <(curl -fsSL https://raw.githubusercontent.com/notroboy67-htp/panel/refs/heads/main/install-1.sh)'
 '
 
 NOKVM_COMMAND='bash <(curl -fsSL https://raw.githubusercontent.com/notroboy67-htp/VMS/refs/heads/main/nokvm.sh)'
@@ -161,7 +161,7 @@ install_pufferpanel() {
 }
 
 # ============================================================
-#                      INSTALL: SKYPORT
+#                      INSTALL: MCPANEL
 # ============================================================
 
 install_skyport() {
