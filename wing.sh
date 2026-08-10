@@ -2,293 +2,301 @@
 set -Eeuo pipefail
 
 # ============================================================
-#                    NRB WINGS INSTALLER
+#                 NRB OFFICIAL WINGS INSTALLER
 # ============================================================
-# Pterodactyl Wings installer
-# NRB Hosting
+# Follows the official Pterodactyl Wings installation flow.
 #
-# Features:
-#   - Root verification
-#   - OS / architecture detection
-#   - Interrupted dpkg repair
-#   - Broken dependency repair
-#   - Docker installation and verification
-#   - Latest Wings binary installation
-#   - Wings systemd service creation
-#   - config.yml detection
-#   - Wings service verification
+# Official documentation:
+# https://pterodactyl.io/wings/1.0/installing
+#
+# This script does NOT:
+#   - use third-party Wings installers
+#   - use .netrc credentials
+#   - generate a fake config.yml
+#   - modify the Panel configuration
+#
+# It performs the documented Wings installation steps and
+# adds only basic safety checks / dpkg recovery for systems
+# where apt reports an interrupted package transaction.
 # ============================================================
 
-WINGS_BIN="/usr/local/bin/wings"
 WINGS_DIR="/etc/pterodactyl"
+WINGS_BIN="/usr/local/bin/wings"
 WINGS_SERVICE="/etc/systemd/system/wings.service"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
-BLUE='\033[0;34m'
 NC='\033[0m'
 
-info()    { echo -e "${CYAN}[INFO]${NC} $*"; }
-success() { echo -e "${GREEN}[OK]${NC} $*"; }
-warning() { echo -e "${YELLOW}[WARNING]${NC} $*"; }
-error()   { echo -e "${RED}[ERROR]${NC} $*"; }
+info() {
+    echo -e "${CYAN}[INFO]${NC} $*"
+}
 
-fail() {
-    error "$*"
+ok() {
+    echo -e "${GREEN}[OK]${NC} $*"
+}
+
+warn() {
+    echo -e "${YELLOW}[WARNING]${NC} $*"
+}
+
+die() {
+    echo -e "${RED}[ERROR]${NC} $*"
     exit 1
 }
 
-check_root() {
-    if [[ "${EUID}" -ne 0 ]]; then
-        fail "Run this installer as root."
-    fi
-}
+# ------------------------------------------------------------
+# Root
+# ------------------------------------------------------------
 
-check_os() {
-    [[ -f /etc/os-release ]] || fail "Cannot detect the operating system."
+if [[ "${EUID}" -ne 0 ]]; then
+    die "Run this installer as root."
+fi
 
-    # shellcheck disable=SC1091
-    source /etc/os-release
+# ------------------------------------------------------------
+# OS
+# ------------------------------------------------------------
 
-    echo
-    info "Operating System: ${PRETTY_NAME:-unknown}"
+if [[ ! -f /etc/os-release ]]; then
+    die "Cannot detect the operating system."
+fi
 
-    case "${ID:-}" in
-        ubuntu|debian|rocky|almalinux|rhel)
-            success "Operating system detected."
-            ;;
-        *)
-            warning "This OS is not in the expected supported list."
-            read -rp "Continue anyway? [y/N]: " answer
-            [[ "${answer}" =~ ^[Yy]$ ]] || fail "Installation cancelled."
+# shellcheck disable=SC1091
+source /etc/os-release
+
+echo
+echo "============================================================"
+echo "              NRB OFFICIAL WINGS INSTALLER"
+echo "============================================================"
+echo
+info "Operating System: ${PRETTY_NAME:-unknown}"
+
+case "${ID:-}" in
+    ubuntu|debian|rocky|almalinux|rhel)
+        ok "Supported Linux family detected."
+        ;;
+    *)
+        warn "This operating system is not listed in the official"
+        warn "Pterodactyl Wings supported-system documentation."
+        die "Installation stopped."
+        ;;
+esac
+
+# ------------------------------------------------------------
+# Virtualization
+# Official documentation recommends checking systemd-detect-virt
+# and warns about OpenVZ/LXC. KVM is expected to work.
+# ------------------------------------------------------------
+
+if command -v systemd-detect-virt >/dev/null 2>&1; then
+    VIRT="$(systemd-detect-virt 2>/dev/null || true)"
+    info "Virtualization: ${VIRT:-none/unknown}"
+
+    case "${VIRT}" in
+        openvz|lxc)
+            warn "Official Pterodactyl documentation warns that"
+            warn "OpenVZ/LXC systems may be unable to run Wings."
+            die "Installation stopped on unsupported virtualization."
             ;;
     esac
-}
+fi
 
-detect_architecture() {
-    SYSTEM_ARCH="$(uname -m)"
+# ------------------------------------------------------------
+# Architecture
+# Official command selects amd64 for x86_64 and arm64 otherwise.
+# We explicitly reject other architectures rather than downloading
+# an incorrect binary.
+# ------------------------------------------------------------
 
-    case "${SYSTEM_ARCH}" in
-        x86_64|amd64)
-            WINGS_ARCH="amd64"
-            ;;
-        aarch64|arm64)
-            WINGS_ARCH="arm64"
-            ;;
-        *)
-            fail "Unsupported architecture: ${SYSTEM_ARCH}"
-            ;;
-    esac
+case "$(uname -m)" in
+    x86_64)
+        WINGS_ARCH="amd64"
+        ;;
+    aarch64|arm64)
+        WINGS_ARCH="arm64"
+        ;;
+    *)
+        die "Unsupported CPU architecture: $(uname -m)"
+        ;;
+esac
 
-    success "System architecture: ${SYSTEM_ARCH}"
-    info "Wings architecture: ${WINGS_ARCH}"
-}
+info "Wings architecture: ${WINGS_ARCH}"
 
-check_virtualization() {
-    if command -v systemd-detect-virt >/dev/null 2>&1; then
-        VIRT="$(systemd-detect-virt 2>/dev/null || true)"
-        info "Virtualization: ${VIRT:-unknown}"
+# ------------------------------------------------------------
+# Repair interrupted dpkg transaction
+# ------------------------------------------------------------
+# This is only a recovery step for the exact apt/dpkg error shown
+# during the user's previous installation attempt.
+# It does not replace the official Wings installation procedure.
+# ------------------------------------------------------------
 
-        case "${VIRT}" in
-            lxc|openvz|container)
-                warning "This server appears to be running inside a container."
-                warning "Docker/Wings may require nested-container support."
-                read -rp "Continue? [y/N]: " answer
-                [[ "${answer}" =~ ^[Yy]$ ]] || fail "Installation cancelled."
-                ;;
-        esac
+if command -v dpkg >/dev/null 2>&1; then
+    echo
+    info "Checking package manager state..."
+
+    if ! dpkg --configure -a; then
+        die "dpkg could not finish its pending configuration."
     fi
-}
 
-repair_package_system() {
-    echo
-    echo "============================================================"
-    echo "                 PACKAGE SYSTEM CHECK"
-    echo "============================================================"
-    echo
+    ok "dpkg is ready."
+fi
 
+# ------------------------------------------------------------
+# Dependencies
+# Official Wings documentation lists curl and Docker.
+# ------------------------------------------------------------
+
+if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
 
-    # The screenshot showed:
-    # E: dpkg was interrupted...
-    # Always attempt to finish pending package configuration
-    # before using apt.
-    if command -v dpkg >/dev/null 2>&1; then
-        info "Checking for interrupted dpkg configuration..."
-        if ! dpkg --configure -a; then
-            error "dpkg configuration could not be completed."
-            echo
-            echo "Try manually:"
-            echo "  dpkg --configure -a"
-            echo "  apt-get install -f -y"
-            exit 1
-        fi
-        success "dpkg check completed."
-    fi
+    apt-get update -y
+    apt-get install -y curl ca-certificates
+else
+    command -v curl >/dev/null 2>&1 || die "curl is required."
+fi
 
-    info "Repairing broken dependencies..."
+# ------------------------------------------------------------
+# Docker
+# Official Pterodactyl documentation:
+#
+# curl -sSL https://get.docker.com/ | CHANNEL=stable bash
+#
+# systemctl enable --now docker
+# ------------------------------------------------------------
 
-    if ! apt-get install -f -y; then
-        error "Could not repair package dependencies."
-        echo
-        echo "Try manually:"
-        echo "  dpkg --configure -a"
-        echo "  apt-get install -f -y"
-        exit 1
-    fi
+echo
+echo "============================================================"
+echo "                    DOCKER INSTALLATION"
+echo "============================================================"
+echo
 
-    success "Package system is ready."
-}
+if command -v docker >/dev/null 2>&1; then
+    ok "Docker is already installed."
+else
+    info "Installing Docker CE using the official documented command..."
 
-install_dependencies() {
+    curl -sSL https://get.docker.com/ | CHANNEL=stable bash
+
+    command -v docker >/dev/null 2>&1 || die "Docker installation failed."
+
+    ok "Docker installed."
+fi
+
+info "Enabling Docker at boot..."
+
+systemctl enable --now docker
+
+if ! systemctl is-active --quiet docker; then
+    die "Docker is not running."
+fi
+
+ok "Docker is running."
+
+# ------------------------------------------------------------
+# Kernel information
+# Official documentation recommends checking the kernel.
+# ------------------------------------------------------------
+
+echo
+info "Kernel: $(uname -r)"
+
+# ------------------------------------------------------------
+# Wings directory
+# Official documented command:
+# mkdir -p /etc/pterodactyl
+# ------------------------------------------------------------
+
+echo
+echo "============================================================"
+echo "                    WINGS INSTALLATION"
+echo "============================================================"
+echo
+
+info "Creating ${WINGS_DIR}..."
+
+mkdir -p "${WINGS_DIR}"
+
+[[ -d "${WINGS_DIR}" ]] || die "Could not create ${WINGS_DIR}."
+
+ok "${WINGS_DIR} is ready."
+
+# ------------------------------------------------------------
+# Wings binary
+# Official documented download:
+# https://github.com/pterodactyl/wings/releases/latest/download/
+# wings_linux_<architecture>
+# ------------------------------------------------------------
+
+WINGS_URL="https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_${WINGS_ARCH}"
+
+info "Downloading Wings from the official Pterodactyl GitHub release..."
+echo
+echo "  ${WINGS_URL}"
+echo
+
+curl -L -o "${WINGS_BIN}" "${WINGS_URL}"
+
+[[ -s "${WINGS_BIN}" ]] || die "Wings download failed or produced an empty file."
+
+# Official documented permission command:
+chmod u+x "${WINGS_BIN}"
+
+ok "Wings binary installed."
+
+# ------------------------------------------------------------
+# Version verification
+# ------------------------------------------------------------
+
+echo
+info "Wings binary:"
+"${WINGS_BIN}" version || true
+
+# ------------------------------------------------------------
+# Configuration
+# Official documentation says the node configuration must be
+# generated in the Panel and saved to /etc/pterodactyl/config.yml.
+# ------------------------------------------------------------
+
+echo
+echo "============================================================"
+echo "                     CONFIGURATION"
+echo "============================================================"
+echo
+
+if [[ -f "${WINGS_DIR}/config.yml" ]]; then
+    ok "Existing config.yml found."
+else
+    warn "No config.yml found."
     echo
-    echo "============================================================"
-    echo "                 INSTALLING DEPENDENCIES"
-    echo "============================================================"
+    echo "Official next step:"
     echo
-
-    export DEBIAN_FRONTEND=noninteractive
-
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -y
-
-        apt-get install -y \
-            curl \
-            ca-certificates \
-            gnupg \
-            lsb-release \
-            apt-transport-https
-
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y \
-            curl \
-            ca-certificates \
-            gnupg2
-
-    elif command -v yum >/dev/null 2>&1; then
-        yum install -y \
-            curl \
-            ca-certificates \
-            gnupg2
-
-    else
-        fail "No supported package manager was found."
-    fi
-
-    success "Required packages installed."
-}
-
-install_docker() {
+    echo "  1. Open your Pterodactyl Panel."
+    echo "  2. Go to Admin -> Nodes."
+    echo "  3. Create/select your node."
+    echo "  4. Open the Configuration tab."
+    echo "  5. Copy the generated configuration."
+    echo "  6. Save it as:"
     echo
-    echo "============================================================"
-    echo "                     DOCKER CHECK"
-    echo "============================================================"
+    echo "       ${WINGS_DIR}/config.yml"
     echo
-
-    if command -v docker >/dev/null 2>&1; then
-        success "Docker is already installed."
-    else
-        info "Docker not found."
-        info "Installing Docker..."
-
-        if ! curl -fsSL https://get.docker.com | sh; then
-            fail "Docker installation failed."
-        fi
-
-        success "Docker installed."
-    fi
-
-    info "Enabling Docker..."
-    systemctl enable docker >/dev/null 2>&1 || true
-
-    info "Starting Docker..."
-
-    if ! systemctl restart docker; then
-        systemctl status docker --no-pager || true
-        fail "Docker failed to start."
-    fi
-
-    sleep 2
-
-    if ! systemctl is-active --quiet docker; then
-        systemctl status docker --no-pager || true
-        fail "Docker is not running."
-    fi
-
-    success "Docker is running."
-
+    echo "You can also use the Generate Token command provided"
+    echo "by the Panel, as described in the official documentation."
     echo
-    docker --version || true
-}
+fi
 
-prepare_wings_directory() {
-    echo
-    echo "============================================================"
-    echo "                PREPARING WINGS DIRECTORY"
-    echo "============================================================"
-    echo
+# ------------------------------------------------------------
+# Official Wings systemd service
+# ------------------------------------------------------------
 
-    mkdir -p "${WINGS_DIR}"
-    chmod 755 "${WINGS_DIR}"
+echo
+echo "============================================================"
+echo "                   SYSTEMD SERVICE"
+echo "============================================================"
+echo
 
-    [[ -d "${WINGS_DIR}" ]] || fail "Could not create ${WINGS_DIR}"
-
-    success "Directory ready: ${WINGS_DIR}"
-}
-
-install_wings_binary() {
-    echo
-    echo "============================================================"
-    echo "                  WINGS INSTALLATION"
-    echo "============================================================"
-    echo
-
-    local wings_url
-    local temp_file
-
-    wings_url="https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_${WINGS_ARCH}"
-    temp_file="$(mktemp)"
-
-    trap 'rm -f "${temp_file}"' RETURN
-
-    info "Downloading latest Wings..."
-    echo
-    echo "${wings_url}"
-    echo
-
-    if ! curl \
-        --fail \
-        --location \
-        --retry 3 \
-        --connect-timeout 15 \
-        --output "${temp_file}" \
-        "${wings_url}"; then
-        fail "Wings download failed."
-    fi
-
-    [[ -s "${temp_file}" ]] || fail "Downloaded Wings file is empty."
-
-    install -m 755 "${temp_file}" "${WINGS_BIN}"
-
-    [[ -x "${WINGS_BIN}" ]] || fail "Wings binary installation failed."
-
-    success "Wings installed at ${WINGS_BIN}."
-
-    echo
-    info "Wings version:"
-    "${WINGS_BIN}" version || true
-}
-
-create_wings_service() {
-    echo
-    echo "============================================================"
-    echo "                 WINGS SYSTEMD SERVICE"
-    echo "============================================================"
-    echo
-
-    cat > "${WINGS_SERVICE}" <<'EOF'
+cat > "${WINGS_SERVICE}" <<'EOF'
 [Unit]
 Description=Pterodactyl Wings Daemon
 After=docker.service
@@ -310,171 +318,72 @@ RestartSec=5s
 WantedBy=multi-user.target
 EOF
 
-    chmod 644 "${WINGS_SERVICE}"
-    systemctl daemon-reload
+chmod 644 "${WINGS_SERVICE}"
 
-    [[ -f "${WINGS_SERVICE}" ]] || fail "Could not create Wings service."
+systemctl daemon-reload
 
-    systemctl enable wings >/dev/null 2>&1 || \
-        fail "Could not enable Wings service."
+ok "Official Wings systemd service created."
 
-    success "Wings systemd service created and enabled."
-}
+# ------------------------------------------------------------
+# Official start command:
+# systemctl enable --now wings
+#
+# Only start it automatically when config.yml exists. Otherwise
+# the official configuration step has not been completed yet.
+# ------------------------------------------------------------
 
-check_config() {
+if [[ -f "${WINGS_DIR}/config.yml" ]]; then
+
     echo
-    echo "============================================================"
-    echo "                 WINGS CONFIGURATION"
-    echo "============================================================"
-    echo
-
-    if [[ -f "${WINGS_DIR}/config.yml" ]]; then
-        success "Found ${WINGS_DIR}/config.yml"
-        return 0
-    fi
-
-    warning "No config.yml found."
-    echo
-    echo "Create your node in the Pterodactyl Panel, then place"
-    echo "the generated node configuration at:"
-    echo
-    echo "  ${WINGS_DIR}/config.yml"
-    echo
-
-    return 1
-}
-
-start_wings() {
-    if [[ ! -f "${WINGS_DIR}/config.yml" ]]; then
-        warning "Wings cannot start until config.yml is present."
-        return 0
-    fi
-
     info "Starting Wings..."
 
-    if ! systemctl restart wings; then
-        error "Wings failed to start."
-        journalctl -u wings -n 50 --no-pager || true
-        return 1
-    fi
-
-    sleep 3
-
-    if systemctl is-active --quiet wings; then
-        success "Wings is running."
-        return 0
-    fi
-
-    error "Wings is not running."
-    echo
-    echo "Recent Wings logs:"
-    journalctl -u wings -n 50 --no-pager || true
-    return 1
-}
-
-final_verification() {
-    echo
-    echo "============================================================"
-    echo "                 FINAL VERIFICATION"
-    echo "============================================================"
-    echo
-
-    local failed=0
-
-    if command -v docker >/dev/null 2>&1; then
-        success "Docker binary: OK"
-    else
-        error "Docker binary: FAILED"
-        failed=1
-    fi
-
-    if systemctl is-active --quiet docker; then
-        success "Docker service: RUNNING"
-    else
-        error "Docker service: NOT RUNNING"
-        failed=1
-    fi
-
-    if [[ -x "${WINGS_BIN}" ]]; then
-        success "Wings binary: OK"
-    else
-        error "Wings binary: FAILED"
-        failed=1
-    fi
-
-    if [[ -f "${WINGS_SERVICE}" ]]; then
-        success "Wings systemd service: OK"
-    else
-        error "Wings systemd service: FAILED"
-        failed=1
-    fi
-
-    if [[ -f "${WINGS_DIR}/config.yml" ]]; then
-        success "Wings config.yml: FOUND"
+    if systemctl enable --now wings; then
+        sleep 2
 
         if systemctl is-active --quiet wings; then
-            success "Wings service: RUNNING"
+            ok "Wings is running."
         else
-            warning "Wings service: NOT RUNNING"
+            warn "Wings service did not remain running."
+            echo
+            echo "Recent logs:"
+            journalctl -u wings -n 50 --no-pager || true
         fi
     else
-        warning "Wings config.yml: NOT FOUND"
+        warn "Wings could not be started."
+        echo
+        echo "Recent logs:"
+        journalctl -u wings -n 50 --no-pager || true
     fi
 
-    echo
+else
 
-    if [[ "${failed}" -eq 0 ]]; then
-        success "Core installation verification passed."
-        return 0
-    fi
+    info "Wings was not started because config.yml is not present."
+    info "This follows the official configuration sequence."
 
-    error "One or more core checks failed."
-    return 1
-}
+fi
 
-main() {
-    clear 2>/dev/null || true
+# ------------------------------------------------------------
+# Final
+# ------------------------------------------------------------
 
-    echo
-    echo "============================================================"
-    echo "                    NRB HOSTING"
-    echo "               PTERODACTYL WINGS"
-    echo "                    INSTALLER"
-    echo "============================================================"
-    echo
-
-    check_root
-    check_os
-    detect_architecture
-    check_virtualization
-
-    # Fix the exact dpkg interruption shown in the screenshot
-    repair_package_system
-
-    install_dependencies
-    install_docker
-    prepare_wings_directory
-    install_wings_binary
-    create_wings_service
-
-    check_config || true
-    start_wings || true
-    final_verification || true
-
-    echo
-    echo "============================================================"
-    echo "           NRB WINGS INSTALLATION FINISHED"
-    echo "============================================================"
-    echo
-    echo "Configuration:"
-    echo "  ${WINGS_DIR}/config.yml"
-    echo
-    echo "Useful commands:"
-    echo "  systemctl status wings"
-    echo "  systemctl restart wings"
-    echo "  systemctl stop wings"
-    echo "  journalctl -u wings -f"
-    echo
-}
-
-main "$@"
+echo
+echo "============================================================"
+echo "              NRB WINGS INSTALLATION COMPLETE"
+echo "============================================================"
+echo
+echo "Installed:"
+echo "  Wings:      ${WINGS_BIN}"
+echo "  Directory:  ${WINGS_DIR}"
+echo "  Service:    ${WINGS_SERVICE}"
+echo
+echo "Official configuration file:"
+echo "  ${WINGS_DIR}/config.yml"
+echo
+echo "Useful official commands:"
+echo "  wings --debug"
+echo "  systemctl enable --now wings"
+echo "  systemctl status wings"
+echo
+echo "Official documentation:"
+echo "  https://pterodactyl.io/wings/1.0/installing"
+echo
