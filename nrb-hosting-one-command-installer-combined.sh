@@ -2,744 +2,541 @@
 set -Eeuo pipefail
 
 # ============================================================
-#                 NRB HOSTING ONE-COMMAND INSTALLER
+# NRB HOSTING - PTERODACTYL DOCKER INSTALLER V2
 # ============================================================
-# Main menu:
-# 1) Pterodactyl
-#    1) Pterodactyl Panel + Wings Installation
-#    2) Pterodactyl Wings Installation
-#    3) Return to Main Menu
-# 2) PufferPanel
-# 3) Panel V1
-# 4) NRB No-KVM / QEMU VM Installer
-# 5) LXC + LXD Installation
-# 6) Cloudflare Installation
-# 7) IP Maker
-# 8) Service Start / Stop / Status
-# 9) Uninstall / Repair
-# 10) Exit
+# Docker-based Panel + MariaDB + Redis
+# HTTPS-ready
+# Secure generated credentials
+# Health checks and diagnostic output
+#
+# Supported:
+#   Ubuntu 22.04 / 24.04
+#   Debian 12
+#
+# Run as root.
 # ============================================================
 
-PANEL_WINGS_COMMAND='bash <(curl -fsSL https://raw.githubusercontent.com/notroboy67-htp/Notroboy-/refs/heads/main/nrb-pterodactyl-panel-wings-installer.sh)'
-WINGS_COMMAND='bash <(curl -fsSL https://raw.githubusercontent.com/notroboy67-htp/Notroboy-/refs/heads/main/nrb-wings-3-stage-installer.sh)'
-PUFFERPANEL_COMMAND='curl -fsSL "https://packagecloud.io/install/repositories/pufferpanel/pufferpanel/script.deb.sh?any=true" | bash; apt-get update; apt-get install -y pufferpanel; systemctl enable --now pufferpanel'
-PANEL_V1_COMMAND='bash <(curl -fsSL https://raw.githubusercontent.com/notroboy67-htp/panel/refs/heads/main/install-1.sh)'
-NOKVM_COMMAND='bash <(curl -fsSL https://raw.githubusercontent.com/notroboy67-htp/VMS/refs/heads/main/nokvm.sh)'
-LXC_LXD_COMMAND='bash <(curl -fsSL https://raw.githubusercontent.com/notroboy67-htp/Notroboy-/refs/heads/main/lxd-installer.sh)'
+NRB_DIR="/srv/pterodactyl"
+COMPOSE_FILE="${NRB_DIR}/docker-compose.yml"
+ENV_FILE="${NRB_DIR}/.env"
+CREDENTIAL_FILE="/root/nrb-pterodactyl-credentials.txt"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-WHITE='\033[1;37m'
-NC='\033[0m'
+PANEL_CONTAINER="nrb-pterodactyl-panel"
+DB_CONTAINER="nrb-pterodactyl-db"
+REDIS_CONTAINER="nrb-pterodactyl-cache"
 
-banner() {
-    clear 2>/dev/null || true
-    printf '%b\n' "$CYAN"
-    cat <<'EOF'
-========================================================================
-███╗   ██╗ ██████╗ ████████╗██████╗  ██████╗ ██████╗  ██████╗ ██╗   ██╗
-████╗  ██║██╔═══██╗╚══██╔══╝██╔══██╗██╔═══██╗██╔══██╗██╔═══██╗╚██╗ ██╔╝
-██╔██╗ ██║██║   ██║   ██║   ██████╔╝██║   ██║██████╔╝██║   ██║ ╚████╔╝
-██║╚██╗██║██║   ██║   ██║   ██╔══██╗██║   ██║██╔══██╗██║   ██║  ╚██╔╝
-██║ ╚████║╚██████╔╝   ██║   ██║  ██║╚██████╔╝██████╔╝╚██████╔╝   ██║
-╚═╝  ╚═══╝ ╚═════╝    ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚═════╝  ╚═════╝    ╚═╝
+log()  { echo -e "\033[1;32m[NRB]\033[0m $*"; }
+info() { echo -e "\033[1;36m[INFO]\033[0m $*"; }
+warn() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
+die()  { echo -e "\033[1;31m[ERROR]\033[0m $*"; exit 1; }
 
----------------- • POWERED BY NOTROBOY67 • ----------------
-========================================================================
-EOF
-    printf '%b\n' "$NC"
-}
-
-info() { printf '%b\n' "${CYAN}[INFO]${NC} $*"; }
-success() { printf '%b\n' "${GREEN}[ OK ]${NC} $*"; }
-warn() { printf '%b\n' "${YELLOW}[WARN]${NC} $*"; }
-error() { printf '%b\n' "${RED}[ERROR]${NC} $*"; }
-pause() { echo; read -rp "Press Enter to continue..." _; }
-die() { error "$*"; exit 1; }
+trap 'die "Installer stopped unexpectedly at line ${LINENO}."' ERR
 
 require_root() {
-    [[ "$EUID" -eq 0 ]] || die "Please run this installer as root."
+    [[ "$EUID" -eq 0 ]] || die "Run this installer as root."
 }
 
-check_network() {
-    command -v curl >/dev/null 2>&1 || {
-        error "curl is not installed."
-        return 1
-    }
+detect_os() {
+    [[ -f /etc/os-release ]] || die "Cannot detect operating system."
+    . /etc/os-release
 
-    curl -fsSI --max-time 10 https://github.com >/dev/null 2>&1 || {
-        error "Internet connectivity check failed."
-        return 1
-    }
+    case "${ID}:${VERSION_ID}" in
+        ubuntu:22.04|ubuntu:24.04|debian:12)
+            log "Supported OS detected: ${PRETTY_NAME}"
+            ;;
+        *)
+            die "Unsupported OS: ${PRETTY_NAME}. Use Ubuntu 22.04/24.04 or Debian 12."
+            ;;
+    esac
 }
 
-run_command() {
-    bash -c "$1"
-}
+check_virtualization() {
+    if command -v systemd-detect-virt >/dev/null 2>&1; then
+        VIRT="$(systemd-detect-virt || true)"
 
-pterodactyl_menu() {
-    while true; do
-        banner
+        case "${VIRT}" in
+            openvz|lxc)
+                warn "Detected virtualization: ${VIRT}"
+                warn "Docker/Wings may require additional host support."
 
-        printf '%b\n' "${WHITE}PTERODACTYL INSTALLATION${NC}"
-        echo
-        echo "1) Pterodactyl Panel + Wings Installation"
-        echo "2) Pterodactyl Wings Installation"
-        echo "3) Return to Main Menu"
-        echo
-
-        read -rp "Select an option [1-3]: " choice
-
-        case "$choice" in
-            1)
-                banner
-
-                printf '%b\n' "${WHITE}PTERODACTYL PANEL + WINGS INSTALLATION${NC}"
-                echo
-                echo "This runs the NRB Panel + Wings installer."
-                echo "It includes clear examples, Docker/Wings setup,"
-                echo "Auto-Deploy guidance and final verification."
-                echo
-
-                check_network || {
-                    pause
-                    continue
-                }
-
-                if run_command "$PANEL_WINGS_COMMAND"; then
-                    success "Pterodactyl Panel + Wings installer finished."
-                else
-                    error "Pterodactyl Panel + Wings installer returned an error."
-                fi
-
-                pause
-                ;;
-
-            2)
-                banner
-
-                printf '%b\n' "${WHITE}PTERODACTYL WINGS INSTALLATION${NC}"
-                echo
-                echo "Use this when the Pterodactyl Panel is already installed."
-                echo
-
-                check_network || {
-                    pause
-                    continue
-                }
-
-                if run_command "$WINGS_COMMAND"; then
-                    success "Pterodactyl Wings installer finished."
-                else
-                    error "Pterodactyl Wings installer returned an error."
-                fi
-
-                pause
-                ;;
-
-            3)
-                return
-                ;;
-
-            *)
-                warn "Invalid option. Please choose 1-3."
-                sleep 1
+                read -r -p "Continue? [y/N]: " answer
+                [[ "${answer}" =~ ^[Yy]$ ]] || exit 0
                 ;;
         esac
+    fi
+}
+
+install_docker() {
+    if command -v docker >/dev/null 2>&1; then
+        log "Docker is already installed."
+    else
+        log "Installing Docker..."
+        curl -fsSL https://get.docker.com | sh
+    fi
+
+    systemctl enable --now docker
+
+    docker info >/dev/null 2>&1 || die "Docker is not working."
+
+    log "Docker: OK"
+
+    if docker compose version >/dev/null 2>&1; then
+        log "Docker Compose plugin: OK"
+    else
+        die "Docker Compose plugin is not available."
+    fi
+}
+
+ask_configuration() {
+    echo
+
+    read -r -p "Panel domain (example: panel.example.com): " PANEL_DOMAIN
+    [[ -n "${PANEL_DOMAIN}" ]] || die "Panel domain cannot be empty."
+
+    read -r -p "Administrator email: " ADMIN_EMAIL
+    [[ "${ADMIN_EMAIL}" == *@*.* ]] || die "Enter a valid email address."
+
+    echo
+
+    read -r -p "Enable HTTPS/Let's Encrypt setup instructions? [Y/n]: " HTTPS_ANSWER
+    HTTPS_ANSWER="${HTTPS_ANSWER:-Y}"
+
+    if [[ "${HTTPS_ANSWER}" =~ ^[Yy]$ ]]; then
+        USE_HTTPS="true"
+        APP_URL="https://${PANEL_DOMAIN}"
+    else
+        USE_HTTPS="false"
+        APP_URL="http://${PANEL_DOMAIN}"
+
+        warn "HTTP selected. Do not use this for sensitive production traffic."
+    fi
+
+    DB_NAME="panel"
+    DB_USER="pterodactyl"
+
+    DB_PASSWORD="$(openssl rand -hex 24)"
+    DB_ROOT_PASSWORD="$(openssl rand -hex 24)"
+
+    APP_TIMEZONE="UTC"
+
+    log "Configuration collected."
+}
+
+prepare_directories() {
+    log "Preparing NRB directories..."
+
+    mkdir -p \
+        "${NRB_DIR}/database" \
+        "${NRB_DIR}/var" \
+        "${NRB_DIR}/nginx" \
+        "${NRB_DIR}/certs" \
+        "${NRB_DIR}/logs" \
+        "${NRB_DIR}/redis"
+
+    chmod 700 "${NRB_DIR}"
+}
+
+write_env() {
+    log "Writing secure environment file..."
+
+    umask 077
+
+    cat > "${ENV_FILE}" <<EOF
+PANEL_DOMAIN=${PANEL_DOMAIN}
+ADMIN_EMAIL=${ADMIN_EMAIL}
+APP_URL=${APP_URL}
+APP_TIMEZONE=${APP_TIMEZONE}
+DB_NAME=${DB_NAME}
+DB_USER=${DB_USER}
+DB_PASSWORD=${DB_PASSWORD}
+DB_ROOT_PASSWORD=${DB_ROOT_PASSWORD}
+USE_HTTPS=${USE_HTTPS}
+EOF
+
+    chmod 600 "${ENV_FILE}"
+
+    cat > "${CREDENTIAL_FILE}" <<EOF
+NRB PTERODACTYL CREDENTIALS
+===========================
+
+Panel URL: ${APP_URL}
+Administrator Email: ${ADMIN_EMAIL}
+
+Database Host (inside Docker): database
+Database Port: 3306
+Database Name: ${DB_NAME}
+Database User: ${DB_USER}
+Database Password: ${DB_PASSWORD}
+MariaDB Root Password: ${DB_ROOT_PASSWORD}
+
+Environment file:
+${ENV_FILE}
+
+KEEP THIS FILE PRIVATE.
+DO NOT UPLOAD IT TO GITHUB.
+EOF
+
+    chmod 600 "${CREDENTIAL_FILE}"
+}
+
+write_compose() {
+    log "Generating Docker Compose configuration..."
+
+    cat > "${COMPOSE_FILE}" <<'EOF'
+services:
+
+  database:
+    image: mariadb:10.5
+    container_name: nrb-pterodactyl-db
+    restart: unless-stopped
+
+    command:
+      --default-authentication-plugin=mysql_native_password
+
+    environment:
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+
+    volumes:
+      - /srv/pterodactyl/database:/var/lib/mysql
+
+    networks:
+      - nrb
+
+
+  cache:
+    image: redis:alpine
+    container_name: nrb-pterodactyl-cache
+    restart: unless-stopped
+
+    volumes:
+      - /srv/pterodactyl/redis:/data
+
+    networks:
+      - nrb
+
+
+  panel:
+    image: ghcr.io/pterodactyl/panel:latest
+    container_name: nrb-pterodactyl-panel
+    restart: unless-stopped
+
+    depends_on:
+      - database
+      - cache
+
+    ports:
+      - "80:80"
+      - "443:443"
+
+    environment:
+
+      APP_URL: ${APP_URL}
+      APP_ENV: production
+      APP_TIMEZONE: ${APP_TIMEZONE}
+      APP_SERVICE_AUTHOR: ${ADMIN_EMAIL}
+
+      TRUSTED_PROXIES: ""
+
+      DB_CONNECTION: mysql
+      DB_HOST: database
+      DB_PORT: 3306
+      DB_DATABASE: ${DB_NAME}
+      DB_USERNAME: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+
+      CACHE_DRIVER: redis
+      SESSION_DRIVER: redis
+      QUEUE_DRIVER: redis
+
+      REDIS_HOST: cache
+      REDIS_PORT: 6379
+
+      MAIL_FROM: ${ADMIN_EMAIL}
+      MAIL_DRIVER: smtp
+      MAIL_HOST: ""
+      MAIL_PORT: 587
+      MAIL_USERNAME: ""
+      MAIL_PASSWORD: ""
+      MAIL_ENCRYPTION: tls
+
+    volumes:
+      - /srv/pterodactyl/var:/app/var
+      - /srv/pterodactyl/nginx:/etc/nginx/http.d
+      - /srv/pterodactyl/certs:/etc/letsencrypt
+      - /srv/pterodactyl/logs:/app/storage/logs
+
+    networks:
+      - nrb
+
+
+networks:
+
+  nrb:
+    driver: bridge
+EOF
+
+    chmod 600 "${COMPOSE_FILE}"
+}
+
+start_stack() {
+    log "Pulling container images..."
+
+    cd "${NRB_DIR}"
+
+    docker compose \
+        --env-file "${ENV_FILE}" \
+        -f "${COMPOSE_FILE}" \
+        pull
+
+    log "Starting MariaDB and Redis first..."
+
+    docker compose \
+        --env-file "${ENV_FILE}" \
+        -f "${COMPOSE_FILE}" \
+        up -d database cache
+
+    wait_for_database
+    wait_for_redis
+
+    log "Starting Pterodactyl Panel..."
+
+    docker compose \
+        --env-file "${ENV_FILE}" \
+        -f "${COMPOSE_FILE}" \
+        up -d panel
+
+    sleep 10
+}
+
+wait_for_database() {
+    log "Waiting for MariaDB..."
+
+    for _ in $(seq 1 60); do
+
+        if docker exec "${DB_CONTAINER}" \
+            mariadb-admin ping \
+            -uroot \
+            -p"${DB_ROOT_PASSWORD}" \
+            --silent >/dev/null 2>&1; then
+
+            log "MariaDB: READY"
+            return
+        fi
+
+        sleep 2
     done
+
+    docker logs --tail 80 "${DB_CONTAINER}" || true
+
+    die "MariaDB did not become ready."
 }
 
-install_pufferpanel() {
-    banner
+wait_for_redis() {
+    log "Checking Redis..."
 
-    printf '%b\n' "${WHITE}PUFFERPANEL INSTALLATION${NC}"
+    for _ in $(seq 1 30); do
 
-    check_network || {
-        pause
-        return
-    }
+        if docker exec "${REDIS_CONTAINER}" \
+            redis-cli ping 2>/dev/null | grep -q PONG; then
 
-    if run_command "$PUFFERPANEL_COMMAND"; then
-        success "PufferPanel installation completed."
-        echo "Create administrator: pufferpanel user add"
-        echo "Web port: 8080"
-        echo "SFTP port: 5657"
-    else
-        error "PufferPanel installation failed."
-    fi
-
-    pause
-}
-
-install_panel_v1() {
-    banner
-
-    printf '%b\n' "${WHITE}PANEL V1 INSTALLATION${NC}"
-
-    check_network || {
-        pause
-        return
-    }
-
-    if run_command "$PANEL_V1_COMMAND"; then
-        success "Panel V1 installation completed."
-    else
-        error "Panel V1 installer returned an error."
-    fi
-
-    pause
-}
-
-install_nokvm() {
-    banner
-
-    printf '%b\n' "${WHITE}NRB NO-KVM / QEMU VM INSTALLER${NC}"
-
-    check_network || {
-        pause
-        return
-    }
-
-    if run_command "$NOKVM_COMMAND"; then
-        success "NRB No-KVM installer finished."
-    else
-        error "NRB No-KVM installer returned an error."
-    fi
-
-    pause
-}
-
-install_lxc_lxd() {
-    banner
-
-    printf '%b\n' "${WHITE}LXC + LXD INSTALLATION${NC}"
-
-    check_network || {
-        pause
-        return
-    }
-
-    if run_command "$LXC_LXD_COMMAND"; then
-        success "LXC + LXD installation completed."
-        echo "Verify: lxc version"
-        echo "Initialize: lxd init"
-    else
-        error "LXC + LXD installer returned an error."
-    fi
-
-    pause
-}
-
-install_cloudflare() {
-    banner
-
-    printf '%b\n' "${WHITE}CLOUDFLARE TUNNEL INSTALLATION${NC}"
-
-    check_network || {
-        pause
-        return
-    }
-
-    command -v apt-get >/dev/null 2>&1 || {
-        error "Cloudflare installer requires an APT-based system."
-        pause
-        return
-    }
-
-    apt-get update -y
-    apt-get install -y curl ca-certificates
-
-    curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
-        | tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
-
-    echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" \
-        | tee /etc/apt/sources.list.d/cloudflared.list >/dev/null
-
-    apt-get update -y
-    apt-get install -y cloudflared
-
-    command -v cloudflared >/dev/null 2>&1 || {
-        error "Cloudflared installation failed."
-        pause
-        return
-    }
-
-    success "Cloudflared installed successfully."
-
-    cloudflared --version
-
-    echo
-
-    read -rsp "Enter Cloudflare Tunnel token: " CLOUDFLARE_TOKEN
-    echo
-
-    [[ -n "$CLOUDFLARE_TOKEN" ]] || {
-        error "No Cloudflare Tunnel token entered."
-        pause
-        return
-    }
-
-    if cloudflared service install "$CLOUDFLARE_TOKEN"; then
-        systemctl enable cloudflared
-        systemctl restart cloudflared
-        success "Cloudflare Tunnel started."
-    else
-        error "Cloudflare Tunnel service installation failed."
-    fi
-
-    systemctl --no-pager --full status cloudflared || true
-
-    unset CLOUDFLARE_TOKEN
-
-    pause
-}
-
-install_ip_maker() {
-    banner
-
-    printf '%b\n' "${WHITE}IP MAKER - TAILSCALE${NC}"
-
-    check_network || {
-        pause
-        return
-    }
-
-    info "Installing Tailscale..."
-
-    if command -v tailscale >/dev/null 2>&1; then
-        success "Tailscale is already installed."
-    else
-        if curl -fsSL https://tailscale.com/install.sh | sh; then
-            success "Tailscale installed successfully."
-        else
-            error "Tailscale installation failed."
-            pause
+            log "Redis: READY"
             return
         fi
-    fi
 
-    systemctl enable --now tailscaled
+        sleep 2
+    done
 
-    if ! systemctl is-active --quiet tailscaled; then
-        error "tailscaled is not running."
-        pause
+    docker logs --tail 80 "${REDIS_CONTAINER}" || true
+
+    die "Redis did not become ready."
+}
+
+database_test() {
+    log "Testing Panel database credentials..."
+
+    docker exec "${DB_CONTAINER}" \
+        mariadb \
+        -u"${DB_USER}" \
+        -p"${DB_PASSWORD}" \
+        -D "${DB_NAME}" \
+        -e "SELECT 1;" >/dev/null 2>&1 \
+        || die "Panel database login test failed."
+
+    log "Database credentials: OK"
+}
+
+panel_health() {
+    log "Checking Panel container..."
+
+    docker ps --format '{{.Names}}' |
+        grep -qx "${PANEL_CONTAINER}" \
+        || die "Pterodactyl Panel container is not running."
+
+    log "Panel container: RUNNING"
+
+    info "Recent Panel logs:"
+
+    docker logs --tail 30 "${PANEL_CONTAINER}" || true
+}
+
+create_admin() {
+    echo
+
+    read -r -p \
+        "Create Pterodactyl administrator now? [Y/n]: " \
+        CREATE_ADMIN
+
+    CREATE_ADMIN="${CREATE_ADMIN:-Y}"
+
+    [[ "${CREATE_ADMIN}" =~ ^[Yy]$ ]] || {
+        warn "Skipping administrator creation."
         return
-    fi
+    }
 
-    success "Tailscale service is running."
+    log "Starting Pterodactyl administrator creation..."
+
+    docker exec -it \
+        "${PANEL_CONTAINER}" \
+        php artisan p:user:make
+}
+
+show_wings_instructions() {
+    echo
+
+    echo "============================================================"
+    echo " WINGS / NODE NEXT STEP"
+    echo "============================================================"
+    echo
+
+    echo "The Panel is installed, but Wings is NOT automatically"
+    echo "connected to a Node yet."
 
     echo
 
-    info "Running tailscale up..."
+    echo "1. Open:"
+    echo "   ${APP_URL}"
 
-    if ! tailscale status >/dev/null 2>&1; then
-        if tailscale up --accept-dns=true; then
-            success "Tailscale authentication completed."
+    echo
+
+    echo "2. Log into the administrator account."
+
+    echo
+
+    echo "3. Create a Node in:"
+    echo "   Admin Panel -> Nodes"
+
+    echo
+
+    echo "4. Copy the generated Wings configuration."
+
+    echo
+
+    echo "5. Put it on the Wings server at:"
+    echo "   /etc/pterodactyl/config.yml"
+
+    echo
+
+    echo "6. Start Wings:"
+    echo "   systemctl enable --now wings"
+
+    echo
+
+    echo "Do NOT invent the config.yml manually."
+
+    echo "============================================================"
+}
+
+final_diagnostics() {
+    echo
+
+    log "Running NRB final diagnostics..."
+
+    echo
+
+    docker compose \
+        --env-file "${ENV_FILE}" \
+        -f "${COMPOSE_FILE}" \
+        ps
+
+    echo
+
+    log "Container checks:"
+
+    for container in \
+        "${DB_CONTAINER}" \
+        "${REDIS_CONTAINER}" \
+        "${PANEL_CONTAINER}"
+    do
+
+        if docker inspect \
+            -f '{{.State.Running}}' \
+            "${container}" 2>/dev/null |
+            grep -q true; then
+
+            echo "  [OK] ${container}"
+
         else
-            warn "Tailscale authentication was not completed."
-            echo "Run this later: tailscale up"
-            pause
-            return
+
+            echo "  [FAIL] ${container}"
+
         fi
-    else
-        success "Tailscale is already connected."
-    fi
+    done
 
     echo
 
     echo "============================================================"
-    printf '%b\n' "${GREEN}IP MAKER RESULT${NC}"
+    echo " NRB PTERODACTYL INSTALLATION FINISHED"
     echo "============================================================"
 
-    TAILSCALE_IPV4="$(tailscale ip -4 2>/dev/null || true)"
-    TAILSCALE_IPV6="$(tailscale ip -6 2>/dev/null || true)"
-
-    [[ -n "$TAILSCALE_IPV4" ]] &&
-        echo "Tailscale IPv4: $TAILSCALE_IPV4" ||
-        warn "Tailscale IPv4 unavailable."
-
-    [[ -n "$TAILSCALE_IPV6" ]] &&
-        echo "Tailscale IPv6: $TAILSCALE_IPV6" ||
-        true
+    echo " Panel URL:       ${APP_URL}"
+    echo " Compose file:    ${COMPOSE_FILE}"
+    echo " Environment:     ${ENV_FILE}"
+    echo " Credentials:     ${CREDENTIAL_FILE}"
 
     echo
 
-    tailscale status || true
+    echo " Useful commands:"
+    echo "   cd ${NRB_DIR}"
+    echo "   docker compose --env-file ${ENV_FILE} ps"
+    echo "   docker compose --env-file ${ENV_FILE} logs -f panel"
+    echo "   docker compose --env-file ${ENV_FILE} restart panel"
 
     echo
-    echo "Useful commands:"
-    echo "  tailscale up"
-    echo "  tailscale down"
-    echo "  tailscale status"
-    echo "  tailscale ip"
-    echo "  tailscale logout"
 
-    success "IP Maker setup completed."
+    echo " IMPORTANT:"
+    echo "   HTTPS requires valid DNS and certificate configuration."
+    echo "   Wings must be configured separately from the Panel."
 
-    pause
+    echo "============================================================"
 }
 
-service_menu() {
-    while true; do
-        banner
+main() {
 
-        printf '%b\n' "${WHITE}SERVICE START / STOP / STATUS${NC}"
+    clear || true
 
-        echo
-        echo "1) PufferPanel Start"
-        echo "2) PufferPanel Stop"
-        echo "3) PufferPanel Status"
-        echo "4) Docker Start"
-        echo "5) Docker Stop"
-        echo "6) Docker Status"
-        echo "7) Cloudflare Start"
-        echo "8) Cloudflare Stop"
-        echo "9) Cloudflare Status"
-        echo "10) Tailscale Start"
-        echo "11) Tailscale Stop"
-        echo "12) Tailscale Status"
-        echo "13) Wings Start"
-        echo "14) Wings Stop"
-        echo "15) Wings Status"
-        echo "16) Return"
-        echo
+    echo "============================================================"
+    echo "       NRB HOSTING - PTERODACTYL DOCKER INSTALLER V2"
+    echo "============================================================"
 
-        read -rp "Select an option [1-16]: " choice
+    echo
 
-        case "$choice" in
-            1)
-                systemctl start pufferpanel 2>/dev/null &&
-                    success "PufferPanel started." ||
-                    error "Could not start PufferPanel."
-                pause
-                ;;
-
-            2)
-                systemctl stop pufferpanel 2>/dev/null &&
-                    success "PufferPanel stopped." ||
-                    error "Could not stop PufferPanel."
-                pause
-                ;;
-
-            3)
-                systemctl --no-pager status pufferpanel 2>/dev/null || true
-                pause
-                ;;
-
-            4)
-                systemctl start docker 2>/dev/null &&
-                    success "Docker started." ||
-                    error "Could not start Docker."
-                pause
-                ;;
-
-            5)
-                systemctl stop docker 2>/dev/null &&
-                    success "Docker stopped." ||
-                    error "Could not stop Docker."
-                pause
-                ;;
-
-            6)
-                systemctl --no-pager status docker 2>/dev/null || true
-                pause
-                ;;
-
-            7)
-                systemctl start cloudflared 2>/dev/null &&
-                    success "Cloudflare Tunnel started." ||
-                    error "Could not start Cloudflare Tunnel."
-                pause
-                ;;
-
-            8)
-                systemctl stop cloudflared 2>/dev/null &&
-                    success "Cloudflare Tunnel stopped." ||
-                    error "Could not stop Cloudflare Tunnel."
-                pause
-                ;;
-
-            9)
-                systemctl --no-pager status cloudflared 2>/dev/null || true
-                pause
-                ;;
-
-            10)
-                systemctl start tailscaled 2>/dev/null &&
-                    success "Tailscale started." ||
-                    error "Could not start Tailscale."
-                pause
-                ;;
-
-            11)
-                systemctl stop tailscaled 2>/dev/null &&
-                    success "Tailscale stopped." ||
-                    error "Could not stop Tailscale."
-                pause
-                ;;
-
-            12)
-                if command -v tailscale >/dev/null 2>&1; then
-                    tailscale status || true
-                    echo
-                    tailscale ip || true
-                else
-                    error "Tailscale is not installed."
-                fi
-                pause
-                ;;
-
-            13)
-                systemctl start wings 2>/dev/null &&
-                    success "Wings started." ||
-                    error "Could not start Wings."
-                pause
-                ;;
-
-            14)
-                systemctl stop wings 2>/dev/null &&
-                    success "Wings stopped." ||
-                    error "Could not stop Wings."
-                pause
-                ;;
-
-            15)
-                systemctl --no-pager status wings 2>/dev/null || true
-                pause
-                ;;
-
-            16)
-                return
-                ;;
-
-            *)
-                warn "Invalid option. Please choose 1-16."
-                sleep 1
-                ;;
-        esac
-    done
+    require_root
+    detect_os
+    check_virtualization
+    install_docker
+    ask_configuration
+    prepare_directories
+    write_env
+    write_compose
+    start_stack
+    database_test
+    panel_health
+    create_admin
+    show_wings_instructions
+    final_diagnostics
 }
 
-repair_menu() {
-    while true; do
-        banner
-
-        printf '%b\n' "${WHITE}UNINSTALL / REPAIR${NC}"
-
-        echo
-        echo "1) Repair PufferPanel"
-        echo "2) Restart PufferPanel"
-        echo "3) Uninstall PufferPanel"
-        echo "4) Restart Cloudflare Tunnel"
-        echo "5) Repair Cloudflare Tunnel"
-        echo "6) Uninstall Cloudflare Tunnel"
-        echo "7) Repair Tailscale"
-        echo "8) Restart Tailscale"
-        echo "9) Uninstall Tailscale"
-        echo "10) Wings Restart"
-        echo "11) Wings Repair / Status"
-        echo "12) Return"
-        echo
-
-        read -rp "Select an option [1-12]: " choice
-
-        case "$choice" in
-            1)
-                apt-get update
-                apt-get install --reinstall -y pufferpanel || true
-                systemctl enable --now pufferpanel || true
-                success "PufferPanel repair attempted."
-                pause
-                ;;
-
-            2)
-                systemctl restart pufferpanel 2>/dev/null || true
-                success "PufferPanel restart attempted."
-                pause
-                ;;
-
-            3)
-                read -rp "Uninstall PufferPanel? [y/N]: " answer
-
-                if [[ "$answer" =~ ^[Yy]$ ]]; then
-                    systemctl disable --now pufferpanel 2>/dev/null || true
-                    apt-get remove -y pufferpanel 2>/dev/null || true
-                    success "PufferPanel removed."
-                fi
-
-                pause
-                ;;
-
-            4)
-                systemctl restart cloudflared 2>/dev/null &&
-                    success "Cloudflare restarted." ||
-                    error "Could not restart Cloudflare."
-
-                pause
-                ;;
-
-            5)
-                systemctl restart cloudflared 2>/dev/null &&
-                    success "Cloudflare repair attempted." ||
-                    warn "Cloudflare service unavailable."
-
-                pause
-                ;;
-
-            6)
-                read -rp "Uninstall Cloudflare Tunnel? [y/N]: " answer
-
-                if [[ "$answer" =~ ^[Yy]$ ]]; then
-                    systemctl disable --now cloudflared 2>/dev/null || true
-                    cloudflared service uninstall 2>/dev/null || true
-                    apt-get remove -y cloudflared 2>/dev/null || true
-                    rm -f /etc/apt/sources.list.d/cloudflared.list
-                    rm -f /usr/share/keyrings/cloudflare-main.gpg
-                    success "Cloudflare removed."
-                fi
-
-                pause
-                ;;
-
-            7)
-                if command -v tailscale >/dev/null 2>&1; then
-                    systemctl restart tailscaled
-                    success "Tailscale repair completed."
-                else
-                    warn "Tailscale is not installed."
-                fi
-
-                pause
-                ;;
-
-            8)
-                systemctl restart tailscaled 2>/dev/null &&
-                    success "Tailscale restarted." ||
-                    error "Could not restart Tailscale."
-
-                pause
-                ;;
-
-            9)
-                read -rp "Uninstall Tailscale? [y/N]: " answer
-
-                if [[ "$answer" =~ ^[Yy]$ ]]; then
-                    tailscale logout 2>/dev/null || true
-                    systemctl disable --now tailscaled 2>/dev/null || true
-                    apt-get remove -y tailscale 2>/dev/null || true
-                    success "Tailscale removed."
-                fi
-
-                pause
-                ;;
-
-            10)
-                systemctl restart wings 2>/dev/null &&
-                    success "Wings restarted." ||
-                    error "Could not restart Wings."
-
-                pause
-                ;;
-
-            11)
-                if command -v wings >/dev/null 2>&1; then
-                    wings version || true
-                else
-                    warn "Wings binary not found."
-                fi
-
-                systemctl --no-pager status wings 2>/dev/null || true
-
-                echo
-                journalctl -u wings -n 50 --no-pager 2>/dev/null || true
-
-                pause
-                ;;
-
-            12)
-                return
-                ;;
-
-            *)
-                warn "Invalid option. Please choose 1-12."
-                sleep 1
-                ;;
-        esac
-    done
-}
-
-main_menu() {
-    while true; do
-        banner
-
-        printf '%b\n' "${WHITE}CHOOSE AN OPTION${NC}"
-
-        echo
-        echo "1) Pterodactyl (Panel + Wings / Wings Only)"
-        echo "2) PufferPanel"
-        echo "3) Panel V1"
-        echo "4) NRB No-KVM / QEMU VM Installer"
-        echo "5) LXC + LXD Installation"
-        echo "6) Cloudflare Installation"
-        echo "7) IP Maker"
-        echo "8) Service Start / Stop / Status"
-        echo "9) Uninstall / Repair"
-        echo "10) Exit"
-        echo
-
-        read -rp "Enter your choice [1-10]: " choice
-
-        case "$choice" in
-            1)
-                pterodactyl_menu
-                ;;
-
-            2)
-                install_pufferpanel
-                ;;
-
-            3)
-                install_panel_v1
-                ;;
-
-            4)
-                install_nokvm
-                ;;
-
-            5)
-                install_lxc_lxd
-                ;;
-
-            6)
-                install_cloudflare
-                ;;
-
-            7)
-                install_ip_maker
-                ;;
-
-            8)
-                service_menu
-                ;;
-
-            9)
-                repair_menu
-                ;;
-
-            10)
-                success "Thank you for using NOTROBOY Installer."
-                exit 0
-                ;;
-
-            *)
-                warn "Invalid option. Please choose 1-10."
-                sleep 1
-                ;;
-        esac
-    done
-}
-
-require_root
-main_m
+main "$@"
