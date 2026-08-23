@@ -87,8 +87,8 @@ pterodactyl_menu() {
         banner
         printf '%b\n' "${WHITE}PTERODACTYL INSTALLATION${NC}"
         echo
-        echo "1) Pterodactyl Panel + Wings Installation"
-        echo "2) Pterodactyl Wings Installation"
+        echo "1) Pterodactyl Panel "
+        echo "2) Pterodactyl Wings "
         echo "3) Return to Main Menu"
         echo
         read -rp "Select an option [1-3]: " choice
@@ -483,7 +483,7 @@ main_menu() {
         banner
         printf '%b\n' "${WHITE}CHOOSE AN OPTION${NC}"
         echo
-        echo "1) Pterodactyl (Panel + Wings / Wings Only)"
+        echo "1) Pterodactyl "
         echo "2) PufferPanel"
         echo "3) Panel V1"
         echo "4) NRB No-KVM / QEMU VM Installer"
