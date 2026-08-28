@@ -1,416 +1,207 @@
-install_pterodactyl_panel() {
-    clear
+#!/usr/bin/env bash
 
-    echo "=============================================="
-    echo "       NRB - PTERODACTYL PANEL INSTALLER"
-    echo "              STAGE 1"
-    echo "=============================================="
+set -Eeuo pipefail
+
+# ============================================================
+# NRB - PTERODACTYL PANEL ONLY INSTALLER
+# Stage 1
+#
+# Installation path:
+#   /var/www/pterodactyl
+#
+# Wings:
+#   NOT INSTALLED
+# ============================================================
+
+PANEL_DIR="/var/www/pterodactyl"
+PANEL_ARCHIVE="/tmp/pterodactyl-panel.tar.gz"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+info() {
+    echo -e "${YELLOW}[NRB]${NC} $1"
+}
+
+success() {
+    echo -e "${GREEN}[OK]${NC} $1"
+}
+
+error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+trap 'error "Installation failed at line $LINENO."' ERR
+
+# ============================================================
+# ROOT CHECK
+# ============================================================
+
+if [ "$(id -u)" -ne 0 ]; then
+    error "Run this installer as root."
     echo
+    echo "Example:"
+    echo "sudo bash $0"
+    exit 1
+fi
 
-    if [ "$(id -u)" -ne 0 ]; then
-        echo "[ERROR] Run this installer as root."
-        return 1
-    fi
+# ============================================================
+# OS CHECK
+# ============================================================
 
-    PANEL_DIR="/var/www/pterodactyl"
+if [ ! -f /etc/os-release ]; then
+    error "Cannot detect operating system."
+    exit 1
+fi
 
-    if [ -f "$PANEL_DIR/artisan" ]; then
-        echo "[ERROR] Pterodactyl Panel is already installed."
-        echo
-        echo "Use the NRB Panel Update option instead."
-        return 1
-    fi
+source /etc/os-release
 
-    export DEBIAN_FRONTEND=noninteractive
+case "$ID" in
+    ubuntu|debian)
+        ;;
+    *)
+        error "Unsupported operating system: $ID"
+        echo "Supported: Ubuntu and Debian"
+        exit 1
+        ;;
+esac
 
-    # ==========================================================
-    # STAGE 1 - SYSTEM UPDATE
-    # ==========================================================
+info "Detected OS: $PRETTY_NAME"
 
+# ============================================================
+# EXISTING INSTALLATION CHECK
+# ============================================================
+
+if [ -f "$PANEL_DIR/artisan" ]; then
+    error "Pterodactyl Panel already exists at:"
+    echo "$PANEL_DIR"
     echo
-    echo "[1/8] Updating system packages..."
-    apt-get update -y
-    apt-get upgrade -y
+    echo "This installer is for a fresh installation."
+    exit 1
+fi
 
-    # ==========================================================
-    # STAGE 2 - REQUIRED PACKAGES
-    # ==========================================================
+# ============================================================
+# STAGE 1 - SYSTEM UPDATE
+# ============================================================
 
-    echo
-    echo "[2/8] Installing required packages..."
+echo
+echo "=============================================="
+echo " [1/8] SYSTEM UPDATE"
+echo "=============================================="
 
-    apt-get install -y \
-        curl \
-        wget \
-        git \
-        unzip \
-        tar \
-        gzip \
-        ca-certificates \
-        gnupg \
-        lsb-release \
-        apt-transport-https \
-        software-properties-common \
-        nginx \
-        mariadb-server \
-        redis-server
+apt-get update -y
+apt-get upgrade -y
 
-    # ==========================================================
-    # STAGE 3 - DOCKER
-    # ==========================================================
+success "System updated."
 
-    echo
-    echo "[3/8] Installing Docker..."
+# ============================================================
+# STAGE 2 - BASIC DEPENDENCIES
+# ============================================================
 
-    install -m 0755 -d /etc/apt/keyrings
+echo
+echo "=============================================="
+echo " [2/8] INSTALLING BASIC DEPENDENCIES"
+echo "=============================================="
 
-    if [ ! -f /etc/apt/keyrings/docker.asc ]; then
-        curl -fsSL https://download.docker.com/linux/$ID/gpg \
-            -o /etc/apt/keyrings/docker.asc
+apt-get install -y \
+    curl \
+    wget \
+    git \
+    unzip \
+    tar \
+    gzip \
+    ca-certificates \
+    gnupg \
+    lsb-release \
+    apt-transport-https \
+    software-properties-common \
+    openssl
 
-        chmod a+r /etc/apt/keyrings/docker.asc
-    fi
+success "Basic dependencies installed."
 
-    . /etc/os-release
+# ============================================================
+# STAGE 3 - DOCKER
+# ============================================================
 
-    if [ "$ID" != "ubuntu" ] && [ "$ID" != "debian" ]; then
-        echo "[ERROR] This installer supports Debian and Ubuntu."
-        return 1
-    fi
+echo
+echo "=============================================="
+echo " [3/8] INSTALLING DOCKER"
+echo "=============================================="
 
-    cat > /etc/apt/sources.list.d/docker.list <<EOF
-deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$ID ${VERSION_CODENAME} stable
+install -m 0755 -d /etc/apt/keyrings
+
+if [ ! -f /etc/apt/keyrings/docker.asc ]; then
+    curl -fsSL \
+        "https://download.docker.com/linux/${ID}/gpg" \
+        -o /etc/apt/keyrings/docker.asc
+
+    chmod a+r /etc/apt/keyrings/docker.asc
+fi
+
+cat > /etc/apt/sources.list.d/docker.list <<EOF
+deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${ID} ${VERSION_CODENAME} stable
 EOF
 
-    apt-get update -y
-
-    apt-get install -y \
-        docker-ce \
-        docker-ce-cli \
-        containerd.io \
-        docker-buildx-plugin \
-        docker-compose-plugin
-
-    systemctl enable --now docker
-
-    if ! systemctl is-active --quiet docker; then
-        echo "[ERROR] Docker failed to start."
-        return 1
-    fi
-
-    echo "[OK] Docker is running."
-
-    # ==========================================================
-    # STAGE 4 - PHP
-    # ==========================================================
-
-    echo
-    echo "[4/8] Installing PHP and required extensions..."
-
-    apt-get install -y \
-        php \
-        php-cli \
-        php-fpm \
-        php-mysql \
-        php-gd \
-        php-mbstring \
-        php-bcmath \
-        php-xml \
-        php-curl \
-        php-zip \
-        php-intl \
-        php-sqlite3 \
-        php-redis
-
-    systemctl enable --now php*-fpm
-
-    # ==========================================================
-    # STAGE 5 - COMPOSER
-    # ==========================================================
-
-    echo
-    echo "[5/8] Installing Composer..."
-
-    if ! command -v composer >/dev/null 2>&1; then
-        EXPECTED_CHECKSUM="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
-
-        php -r "copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');"
-
-        ACTUAL_CHECKSUM="$(php -r "echo hash_file('sha384', '/tmp/composer-setup.php');")"
-
-        if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
-            echo "[ERROR] Composer installer verification failed."
-            rm -f /tmp/composer-setup.php
-            return 1
-        fi
-
-        php /tmp/composer-setup.php \
-            --install-dir=/usr/local/bin \
-            --filename=composer
-
-        rm -f /tmp/composer-setup.php
-    fi
-
-    echo "[OK] Composer installed."
-
-    # ==========================================================
-    # STAGE 6 - DATABASE
-    # ==========================================================
-
-    echo
-    echo "[6/8] Configuring MariaDB..."
-
-    systemctl enable --now mariadb
-    systemctl enable --now redis-server
-
-    DB_NAME="panel"
-    DB_USER="pterodactyl"
-    DB_PASSWORD="$(openssl rand -hex 24)"
-
-    mysql <<MYSQL
-CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;
-CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASSWORD}';
-ALTER USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASSWORD}';
-GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';
-FLUSH PRIVILEGES;
-MYSQL
-
-    echo "[OK] Database created."
-
-    # ==========================================================
-    # STAGE 7 - PTERODACTYL PANEL
-    # ==========================================================
-
-    echo
-    echo "[7/8] Installing latest Pterodactyl Panel..."
-
-    mkdir -p /var/www
-
-    cd /var/www || return 1
-
-    curl -fL \
-        https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz \
-        -o /tmp/pterodactyl-panel.tar.gz
-
-    if [ ! -s /tmp/pterodactyl-panel.tar.gz ]; then
-        echo "[ERROR] Failed to download Pterodactyl Panel."
-        return 1
-    fi
-
-    mkdir -p "$PANEL_DIR"
-
-    tar -xzf /tmp/pterodactyl-panel.tar.gz \
-        -C "$PANEL_DIR" \
-        --strip-components=1
-
-    rm -f /tmp/pterodactyl-panel.tar.gz
-
-    cd "$PANEL_DIR" || return 1
-
-    cp .env.example .env
-
-    composer install \
-        --no-dev \
-        --optimize-autoloader \
-        --no-interaction
-
-    php artisan key:generate --force
-
-    # ==========================================================
-    # PANEL ENVIRONMENT
-    # ==========================================================
-
-    echo
-    echo "=============================================="
-    echo "       PTERODACTYL PANEL CONFIGURATION"
-    echo "=============================================="
-    echo
-
-    read -rp "Panel APP URL (example: https://panel.example.com): " PANEL_URL
-
-    if [ -z "$PANEL_URL" ]; then
-        echo "[ERROR] Panel URL cannot be empty."
-        return 1
-    fi
-
-    php artisan p:environment:database \
-        --host=127.0.0.1 \
-        --port=3306 \
-        --database="$DB_NAME" \
-        --username="$DB_USER" \
-        --password="$DB_PASSWORD"
-
-    php artisan p:environment:setup \
-        --author="$PANEL_URL" \
-        --url="$PANEL_URL" \
-        --timezone="Asia/Kolkata" \
-        --cache="redis" \
-        --session="redis" \
-        --queue="redis" \
-        --redis-host="127.0.0.1" \
-        --redis-port="6379" \
-        --redis-password=""
-
-    # ==========================================================
-    # DATABASE MIGRATION
-    # ==========================================================
-
-    echo
-    echo "[OK] Running database migrations..."
-
-    php artisan migrate --seed --force
-
-    # ==========================================================
-    # PERMISSIONS
-    # ==========================================================
-
-    chown -R www-data:www-data "$PANEL_DIR/storage"
-    chown -R www-data:www-data "$PANEL_DIR/bootstrap/cache"
-
-    chmod -R 755 "$PANEL_DIR/storage"
-    chmod -R 755 "$PANEL_DIR/bootstrap/cache"
-
-    # ==========================================================
-    # NGINX
-    # ==========================================================
-
-    echo
-    echo "[OK] Configuring Nginx..."
-
-    PHP_FPM_SOCKET="$(find /run/php -name 'php*-fpm.sock' | head -1)"
-
-    if [ -z "$PHP_FPM_SOCKET" ]; then
-        echo "[ERROR] PHP-FPM socket not found."
-        return 1
-    fi
-
-    cat > /etc/nginx/sites-available/pterodactyl.conf <<EOF
-server {
-    listen 80;
-    server_name _;
-
-    root $PANEL_DIR/public;
-    index index.php;
-
-    client_max_body_size 100m;
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
-
-    location ~ \.php$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:$PHP_FPM_SOCKET;
-    }
-
-    location ~ /\.ht {
-        deny all;
-    }
-}
-EOF
-
-    rm -f /etc/nginx/sites-enabled/default
-
-    ln -sf \
-        /etc/nginx/sites-available/pterodactyl.conf \
-        /etc/nginx/sites-enabled/pterodactyl.conf
-
-    nginx -t
-
-    if [ $? -ne 0 ]; then
-        echo "[ERROR] Nginx configuration test failed."
-        return 1
-    fi
-
-    systemctl enable --now nginx
-    systemctl restart nginx
-
-    # ==========================================================
-    # ADMIN ACCOUNT
-    # ==========================================================
-
-    echo
-    echo "=============================================="
-    echo "          CREATE PANEL ADMIN"
-    echo "=============================================="
-    echo
-
-    php artisan p:user:make
-
-    # ==========================================================
-    # CACHE
-    # ==========================================================
-
-    echo
-    echo "[8/8] Finalizing Panel..."
-
-    php artisan config:clear
-    php artisan cache:clear
-    php artisan view:clear
-
-    php artisan config:cache
-    php artisan route:cache
-    php artisan view:cache
-
-    # ==========================================================
-    # FINAL VERIFICATION
-    # ==========================================================
-
-    echo
-    echo "=============================================="
-    echo "       NRB PTERODACTYL PANEL READY"
-    echo "=============================================="
-    echo
-
-    echo "Panel directory:"
-    echo "  $PANEL_DIR"
-    echo
-
-    echo "Panel URL:"
-    echo "  $PANEL_URL"
-    echo
-
-    echo "Database:"
-    echo "  $DB_NAME"
-    echo
-
-    echo "Database user:"
-    echo "  $DB_USER"
-    echo
-
-    echo "Database password:"
-    echo "  $DB_PASSWORD"
-    echo
-
-    echo "Docker:"
-    docker --version
-    echo
-
-    echo "PHP:"
-    php -v | head -1
-    echo
-
-    echo "Pterodactyl:"
-    php artisan --version
-    echo
-
-    echo "Nginx:"
-    systemctl is-active nginx
-    echo
-
-    echo "MariaDB:"
-    systemctl is-active mariadb
-    echo
-
-    echo "Redis:"
-    systemctl is-active redis-server
-    echo
-
-    echo "=============================================="
-    echo "       STAGE 1 COMPLETE"
-    echo "=============================================="
-    echo
-    echo "Wings has NOT been installed."
-    echo "Wings will be configured in Stage 2."
-    echo
-}
+apt-get update -y
+
+apt-get install -y \
+    docker-ce \
+    docker-ce-cli \
+    containerd.io \
+    docker-buildx-plugin \
+    docker-compose-plugin
+
+systemctl enable --now docker
+
+if ! systemctl is-active --quiet docker; then
+    error "Docker is not running."
+    exit 1
+fi
+
+success "Docker installed and running."
+
+# ============================================================
+# STAGE 4 - PHP / NGINX / DATABASE / REDIS
+# ============================================================
+
+echo
+echo "=============================================="
+echo " [4/8] INSTALLING PANEL DEPENDENCIES"
+echo "=============================================="
+
+apt-get install -y \
+    nginx \
+    mariadb-server \
+    redis-server \
+    php \
+    php-cli \
+    php-fpm \
+    php-mysql \
+    php-gd \
+    php-mbstring \
+    php-bcmath \
+    php-xml \
+    php-curl \
+    php-zip \
+    php-intl \
+    php-sqlite3 \
+    php-redis
+
+systemctl enable --now mariadb
+systemctl enable --now redis-server
+
+PHP_VERSION="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
+
+info "Detected PHP version: $PHP_VERSION"
+
+success "Panel dependencies installed."
+
+# ============================================================
+# COMPOSER
+# ============================================================
+
+info "Installing Composer..."
+
+if ! command -v composer
