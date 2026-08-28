@@ -1,343 +1,194 @@
-#!/usr/bin/env bash
-set -Eeuo pipefail
+update_pterodactyl() {
+    clear
 
-# ============================================================
-#                 NRB PTERODACTYL INSTALLER
-# ============================================================
-# Installs the official Pterodactyl Panel release.
-#
-# Official Panel:
-# https://github.com/pterodactyl/panel
-# ============================================================
-
-PANEL_DIR="/var/www/pterodactyl"
-PANEL_URL="https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz"
-MYSQL_DB="panel"
-MYSQL_USER="pterodactyl"
-
-echo
-echo "============================================================"
-echo "              NRB PTERODACTYL INSTALLER"
-echo "============================================================"
-echo
-
-if [[ "$EUID" -ne 0 ]]; then
-    echo "ERROR: Please run this installer as root."
-    echo "Example: sudo bash pipatroductal.sh"
-    exit 1
-fi
-
-if [[ ! -f /etc/os-release ]]; then
-    echo "ERROR: Cannot detect operating system."
-    exit 1
-fi
-
-source /etc/os-release
-
-case "$ID" in
-    ubuntu|debian)
-        OS="$ID"
-        ;;
-    *)
-        echo "ERROR: This installer supports Ubuntu and Debian."
-        echo "Detected: $ID"
-        exit 1
-        ;;
-esac
-
-echo "[+] Operating system: $PRETTY_NAME"
-
-read -rp "Enter your Panel domain/IP: " FQDN
-[[ -n "$FQDN" ]] || { echo "ERROR: Domain/IP cannot be empty."; exit 1; }
-
-read -rp "Enter admin email: " ADMIN_EMAIL
-read -rp "Enter admin username: " ADMIN_USERNAME
-read -rp "Enter admin first name: " ADMIN_FIRSTNAME
-read -rp "Enter admin last name: " ADMIN_LASTNAME
-
-while true; do
-    read -rsp "Enter admin password: " ADMIN_PASSWORD
-    echo
-    read -rsp "Confirm admin password: " ADMIN_PASSWORD2
+    echo "=============================================="
+    echo "       NRB - PTERODACTYL PANEL UPDATE"
+    echo "=============================================="
     echo
 
-    if [[ "$ADMIN_PASSWORD" == "$ADMIN_PASSWORD2" && -n "$ADMIN_PASSWORD" ]]; then
-        break
+    PANEL_DIR="/var/www/pterodactyl"
+
+    # Root check
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "[ERROR] Please run this option as root."
+        return 1
     fi
-    echo "ERROR: Passwords do not match."
-done
 
-read -rp "Timezone [UTC]: " TIMEZONE
-TIMEZONE="${TIMEZONE:-UTC}"
-
-echo
-echo "============================================================"
-echo "Installation settings"
-echo "============================================================"
-echo "Panel URL : http://$FQDN"
-echo "Database  : $MYSQL_DB"
-echo "DB User   : $MYSQL_USER"
-echo "Timezone  : $TIMEZONE"
-echo "============================================================"
-echo
-
-read -rp "Continue installation? [y/N]: " CONFIRM
-[[ "$CONFIRM" =~ ^[Yy]$ ]] || { echo "Installation cancelled."; exit 0; }
-
-echo
-echo "[1/10] Updating system..."
-apt-get update -y
-apt-get upgrade -y
-
-echo
-echo "[2/10] Installing required packages..."
-apt-get install -y \
-    curl ca-certificates gnupg lsb-release apt-transport-https \
-    software-properties-common unzip tar git cron nginx \
-    mariadb-server redis-server openssl
-
-echo
-echo "[3/10] Configuring PHP repository..."
-
-if [[ "$OS" == "ubuntu" ]]; then
-    add-apt-repository -y universe
-    if ! grep -Rqs "ondrej/php" /etc/apt/sources.list.d/; then
-        add-apt-repository -y ppa:ondrej/php
+    # Check installation
+    if [ ! -d "$PANEL_DIR" ] || [ ! -f "$PANEL_DIR/artisan" ]; then
+        echo "[ERROR] Pterodactyl Panel installation was not found."
+        return 1
     fi
-elif [[ "$OS" == "debian" ]]; then
-    curl -fsSL https://packages.sury.org/php/apt.gpg \
-        -o /etc/apt/trusted.gpg.d/php.gpg
-    echo "deb https://packages.sury.org/php/ $(lsb_release -sc) main" \
-        > /etc/apt/sources.list.d/php.list
-fi
 
-apt-get update -y
+    cd "$PANEL_DIR" || return 1
 
-echo
-echo "[4/10] Installing PHP 8.3..."
-apt-get install -y \
-    php8.3 php8.3-cli php8.3-common php8.3-gd \
-    php8.3-mysql php8.3-mbstring php8.3-bcmath \
-    php8.3-xml php8.3-fpm php8.3-curl php8.3-zip
+    echo "[1/6] Detecting installed version..."
 
-echo
-echo "[5/10] Installing Composer..."
-if ! command -v composer >/dev/null 2>&1; then
-    curl -sS https://getcomposer.org/installer \
-        | php -- --install-dir=/usr/local/bin --filename=composer
-    chmod +x /usr/local/bin/composer
-fi
-composer --version
+    CURRENT_VERSION=$(php artisan --version 2>/dev/null \
+        | sed -nE 's/.*version ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')
 
-echo
-echo "[6/10] Starting services..."
-systemctl enable --now mariadb
-systemctl enable --now redis-server
-systemctl enable --now nginx
-systemctl enable --now php8.3-fpm
-systemctl enable --now cron
+    if [ -z "$CURRENT_VERSION" ]; then
+        echo "[ERROR] Could not determine installed Pterodactyl version."
+        return 1
+    fi
 
-echo
-echo "[7/10] Configuring MariaDB..."
-MYSQL_PASSWORD="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 32)"
+    echo "[OK] Installed version: v$CURRENT_VERSION"
 
-mysql <<SQL
-CREATE DATABASE IF NOT EXISTS \`${MYSQL_DB}\`
-    CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '${MYSQL_USER}'@'127.0.0.1'
-    IDENTIFIED BY '${MYSQL_PASSWORD}';
-ALTER USER '${MYSQL_USER}'@'127.0.0.1'
-    IDENTIFIED BY '${MYSQL_PASSWORD}';
-GRANT ALL PRIVILEGES ON \`${MYSQL_DB}\`.*
-    TO '${MYSQL_USER}'@'127.0.0.1';
-FLUSH PRIVILEGES;
-SQL
+    echo
+    echo "[2/6] Checking latest Pterodactyl release..."
 
-echo "[+] Database created."
+    LATEST_VERSION=$(curl -fsSL \
+        https://api.github.com/repos/pterodactyl/panel/releases/latest \
+        | grep '"tag_name":' \
+        | head -1 \
+        | sed -E 's/.*"v([^"]+)".*/\1/')
 
-echo
-echo "[8/10] Downloading official Pterodactyl Panel..."
-mkdir -p "$PANEL_DIR"
-cd "$PANEL_DIR"
-rm -f panel.tar.gz
+    if [ -z "$LATEST_VERSION" ]; then
+        echo "[ERROR] Unable to determine latest release."
+        return 1
+    fi
 
-curl -fL "$PANEL_URL" -o panel.tar.gz
-tar -xzvf panel.tar.gz
-rm -f panel.tar.gz
+    echo "[OK] Latest version: v$LATEST_VERSION"
 
-chmod -R 755 storage bootstrap/cache
-cp .env.example .env
+    echo
+    echo "[3/6] Comparing versions..."
 
-echo
-echo "[9/10] Installing Panel dependencies..."
-COMPOSER_ALLOW_SUPERUSER=1 composer install \
-    --no-dev --optimize-autoloader
+    if [ "$(printf '%s\n' "$CURRENT_VERSION" "$LATEST_VERSION" | sort -V | tail -1)" = "$CURRENT_VERSION" ]; then
+        echo
+        echo "=============================================="
+        echo "          PTERODACTYL IS UP TO DATE"
+        echo "=============================================="
+        echo
+        echo "Installed : v$CURRENT_VERSION"
+        echo "Latest    : v$LATEST_VERSION"
+        echo
+        return 0
+    fi
 
-echo
-echo "[10/10] Configuring Pterodactyl..."
-php artisan key:generate --force
+    echo
+    echo "Update available:"
+    echo "  v$CURRENT_VERSION -> v$LATEST_VERSION"
+    echo
 
-php artisan p:environment:setup \
-    --author="$ADMIN_EMAIL" \
-    --url="http://$FQDN" \
-    --timezone="$TIMEZONE" \
-    --cache="redis" \
-    --session="redis" \
-    --queue="redis" \
-    --redis-host="127.0.0.1" \
-    --redis-pass="null" \
-    --redis-port="6379" \
-    --telemetry=true \
-    --settings-ui=true
+    read -rp "Continue with update? [y/N]: " CONFIRM
 
-php artisan p:environment:database \
-    --host="127.0.0.1" \
-    --port="3306" \
-    --database="$MYSQL_DB" \
-    --username="$MYSQL_USER" \
-    --password="$MYSQL_PASSWORD"
+    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+        echo "Update cancelled."
+        return 0
+    fi
 
-php artisan migrate --seed --force
+    echo
+    echo "[4/6] Enabling maintenance mode..."
 
-php artisan p:user:make \
-    --email="$ADMIN_EMAIL" \
-    --username="$ADMIN_USERNAME" \
-    --name-first="$ADMIN_FIRSTNAME" \
-    --name-last="$ADMIN_LASTNAME" \
-    --password="$ADMIN_PASSWORD" \
-    --admin=1
+    php artisan down || true
 
-chown -R www-data:www-data "$PANEL_DIR"
-chmod -R 755 "$PANEL_DIR/storage" "$PANEL_DIR/bootstrap/cache"
+    echo
+    echo "[5/6] Downloading latest Panel..."
 
-CRON_LINE="* * * * * php $PANEL_DIR/artisan schedule:run >> /dev/null 2>&1"
-(
-    crontab -u www-data -l 2>/dev/null || true
-    echo "$CRON_LINE"
-) | crontab -u www-data -
+    BACKUP_DIR="/root/pterodactyl-backup-$(date +%Y%m%d-%H%M%S)"
 
-cat > /etc/systemd/system/pteroq.service <<EOF
-[Unit]
-Description=Pterodactyl Queue Worker
-After=redis-server.service
+    mkdir -p "$BACKUP_DIR"
 
-[Service]
-User=www-data
-Group=www-data
-Restart=always
-ExecStart=/usr/bin/php ${PANEL_DIR}/artisan queue:work --queue=high,standard,low --sleep=3 --tries=3
-RestartSec=5s
+    # Backup important configuration
+    if [ -f .env ]; then
+        cp .env "$BACKUP_DIR/.env"
+    fi
 
-[Install]
-WantedBy=multi-user.target
-EOF
+    echo "[OK] Backup created at:"
+    echo "     $BACKUP_DIR"
 
-systemctl daemon-reload
-systemctl enable --now pteroq
+    # Download release
+    TMP_FILE="/tmp/pterodactyl-panel.tar.gz"
 
-rm -f /etc/nginx/sites-enabled/default
+    rm -f "$TMP_FILE"
 
-cat > /etc/nginx/sites-available/pterodactyl.conf <<EOF
-server {
-    listen 80;
-    server_name ${FQDN};
+    curl -fL \
+        https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz \
+        -o "$TMP_FILE"
 
-    root ${PANEL_DIR}/public;
-    index index.php;
+    if [ ! -s "$TMP_FILE" ]; then
+        echo "[ERROR] Panel download failed."
 
-    client_max_body_size 100m;
-    client_body_timeout 120s;
+        php artisan up || true
+        return 1
+    fi
 
-    access_log /var/log/nginx/pterodactyl.access.log;
-    error_log /var/log/nginx/pterodactyl.error.log;
+    # Preserve .env
+    mv .env "$BACKUP_DIR/.env.update-backup" 2>/dev/null || true
 
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
+    # Extract new Panel files
+    tar -xzf "$TMP_FILE" -C "$PANEL_DIR"
 
-    location = /favicon.ico {
-        access_log off;
-        log_not_found off;
-    }
+    # Restore .env
+    if [ -f "$BACKUP_DIR/.env.update-backup" ]; then
+        mv "$BACKUP_DIR/.env.update-backup" "$PANEL_DIR/.env"
+    fi
 
-    location = /robots.txt {
-        access_log off;
-        log_not_found off;
-    }
+    rm -f "$TMP_FILE"
 
-    location ~ \.php$ {
-        fastcgi_split_path_info ^(.+\.php)(/.+)\$;
-        fastcgi_pass unix:/run/php/php8.3-fpm.sock;
-        fastcgi_index index.php;
-        include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        fastcgi_param PATH_INFO \$fastcgi_path_info;
-    }
+    echo
+    echo "[OK] Panel files updated."
 
-    location ~ /\.ht {
-        deny all;
-    }
+    echo
+    echo "[6/6] Updating dependencies and database..."
+
+    chmod -R 755 storage bootstrap/cache
+
+    composer install \
+        --no-dev \
+        --optimize-autoloader \
+        --no-interaction
+
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] Composer update failed."
+        php artisan up || true
+        return 1
+    fi
+
+    php artisan migrate --seed --force
+
+    if [ $? -ne 0 ]; then
+        echo "[ERROR] Database migration failed."
+        php artisan up || true
+        return 1
+    fi
+
+    # Clear Laravel caches
+    php artisan view:clear
+    php artisan config:clear
+    php artisan route:clear
+
+    # Rebuild optimized caches
+    php artisan config:cache
+    php artisan route:cache
+    php artisan view:cache
+
+    # Fix permissions
+    chown -R www-data:www-data \
+        "$PANEL_DIR/storage" \
+        "$PANEL_DIR/bootstrap/cache"
+
+    echo
+    echo "Restarting web services..."
+
+    systemctl restart nginx 2>/dev/null || true
+    systemctl restart php*-fpm 2>/dev/null || true
+
+    php artisan up
+
+    FINAL_VERSION=$(php artisan --version 2>/dev/null \
+        | sed -nE 's/.*version ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p')
+
+    echo
+    echo "=============================================="
+    echo "       PTERODACTYL UPDATE COMPLETE"
+    echo "=============================================="
+    echo
+    echo "Previous : v$CURRENT_VERSION"
+    echo "Current  : v${FINAL_VERSION:-$LATEST_VERSION}"
+    echo
+    echo "Backup:"
+    echo "$BACKUP_DIR"
+    echo
+    echo "=============================================="
 }
-EOF
-
-ln -sf /etc/nginx/sites-available/pterodactyl.conf \
-    /etc/nginx/sites-enabled/pterodactyl.conf
-
-nginx -t
-systemctl restart nginx
-systemctl restart php8.3-fpm
-systemctl restart pteroq
-
-cat > /root/nrb-pterodactyl-install.txt <<EOF
-============================================================
-NRB PTERODACTYL INSTALLATION
-============================================================
-
-Panel URL:
-http://${FQDN}
-
-Admin Email:
-${ADMIN_EMAIL}
-
-Admin Username:
-${ADMIN_USERNAME}
-
-Database:
-${MYSQL_DB}
-
-Database User:
-${MYSQL_USER}
-
-Database Password:
-${MYSQL_PASSWORD}
-
-Panel Directory:
-${PANEL_DIR}
-
-Queue Service:
-pteroq
-
-============================================================
-KEEP THIS FILE SECURE.
-============================================================
-EOF
-
-chmod 600 /root/nrb-pterodactyl-install.txt
-
-echo
-echo "============================================================"
-echo "             INSTALLATION COMPLETE"
-echo "============================================================"
-echo
-echo "Official Pterodactyl Panel installed."
-echo
-echo "Panel URL:"
-echo "http://${FQDN}"
-echo
-echo "Admin username:"
-echo "${ADMIN_USERNAME}"
-echo
-echo "Credentials saved to:"
-echo "/root/nrb-pterodactyl-install.txt"
-echo
-echo "============================================================"
