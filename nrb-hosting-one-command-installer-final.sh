@@ -24,7 +24,7 @@ set -Eeuo pipefail
 # logic and official-flow validation.
 # ============================================================
 
-PANEL_WINGS_COMMAND='bash <(curl -fsSL https://raw.githubusercontent.com/notroboy67-htp/Notroboy-/refs/heads/main/Pipatroductal.sh)'
+PANEL_WINGS_COMMAND='bash <(curl -fsSL installation)'
 WINGS_COMMAND='bash <(curl -fsSL https://raw.githubusercontent.com/notroboy67-htp/Notroboy-/refs/heads/main/nrb-wings-3-stage-installer.sh)'
 PUFFERPANEL_COMMAND='curl -fsSL "https://packagecloud.io/install/repositories/pufferpanel/pufferpanel/script.deb.sh?any=true" | bash; apt-get update; apt-get install -y pufferpanel; systemctl enable --now pufferpanel'
 PANEL_V1_COMMAND='bash <(curl -fsSL https://raw.githubusercontent.com/notroboy67-htp/panel/refs/heads/main/install-1.sh)'
