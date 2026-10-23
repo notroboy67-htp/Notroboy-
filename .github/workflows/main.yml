@@ -1,10 +1,10 @@
-name: NRB Fast Client Windows
+name: NRB Fast Client
 
 on:
   workflow_dispatch:
 
 jobs:
-  setup-windows:
+  setup:
     runs-on: windows-latest
     timeout-minutes: 360
 
@@ -12,17 +12,26 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install Development Tools
+      - name: Install Java
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          winget install --id EclipseAdoptium.Temurin.21.JDK `
+            --exact --silent `
+            --accept-package-agreements `
+            --accept-source-agreements
 
+          if ($LASTEXITCODE -ne 0) {
+            throw "Java installation failed."
+          }
+
+      - name: Install VS Code and Git
+        shell: pwsh
+        run: |
           $packages = @(
-            "Git.Git",
             "Microsoft.VisualStudioCode",
-            "Python.Python.3.12",
-            "Microsoft.VCRedist.2015+.x64",
-            "Tailscale.Tailscale"
+            "Git.Git",
+            "Kitware.CMake",
+            "Microsoft.VCRedist.2015+.x64"
           )
 
           foreach ($package in $packages) {
@@ -34,52 +43,14 @@ jobs:
               --disable-interactivity
 
             if ($LASTEXITCODE -ne 0) {
-              Write-Warning "$package returned exit code $LASTEXITCODE"
+              Write-Warning "$package installation returned an error."
             }
           }
 
-          $env:PATH += ";C:\Program Files\Git\cmd"
-
-      - name: Install Visual C++ Build Tools
+      - name: Install OpenGL Development Libraries
         shell: pwsh
         run: |
-          winget install `
-            --id Microsoft.VisualStudio.2022.BuildTools `
-            --exact --silent `
-            --accept-package-agreements `
-            --accept-source-agreements `
-            --override "--wait --quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-
-          if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Visual C++ Build Tools installation returned an error."
-          }
-
-      - name: Install OpenGL Development Dependencies
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          # Install CMake for native graphics projects
-          winget install --id Kitware.CMake --exact --silent `
-            --accept-package-agreements `
-            --accept-source-agreements `
-            --disable-interactivity
-
-          if ($LASTEXITCODE -ne 0) {
-            Write-Warning "CMake installation returned an error."
-          }
-
-          # Install the Vulkan SDK, useful for graphics development
-          winget install --id KhronosGroup.VulkanSDK --exact --silent `
-            --accept-package-agreements `
-            --accept-source-agreements `
-            --disable-interactivity
-
-          if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Vulkan SDK installation returned an error."
-          }
-
-          # Install Mesa OpenGL utilities/libraries through vcpkg
+          # Install vcpkg for native graphics dependencies.
           if (-not (Test-Path "C:\vcpkg")) {
             git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
           }
@@ -90,10 +61,11 @@ jobs:
             throw "vcpkg bootstrap failed."
           }
 
-          & C:\vcpkg\vcpkg.exe install mesa:x64-windows
+          # GLFW and GLEW are useful for OpenGL development.
+          & C:\vcpkg\vcpkg.exe install glfw3:x64-windows glew:x64-windows
 
           if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Mesa package installation failed; see build logs."
+            throw "OpenGL development dependency installation failed."
           }
 
       - name: Create NRB User
@@ -105,10 +77,22 @@ jobs:
           if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
             New-LocalUser -Name $username `
               -Password $password `
-              -Description "NRB Fast Client User"
+              -Description "NRB Fast Client"
           }
 
-          Write-Host "NRB user setup completed."
+          Write-Host "NRB user configured."
+
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          winget install --id Tailscale.Tailscale `
+            --exact --silent `
+            --accept-package-agreements `
+            --accept-source-agreements
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tailscale installation failed."
+          }
 
       - name: Authenticate Tailscale
         shell: pwsh
@@ -116,14 +100,10 @@ jobs:
           TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
-            throw "Add TS_AUTHKEY to GitHub repository secrets."
+            throw "Configure the TS_AUTHKEY repository secret."
           }
 
           $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          if (-not (Test-Path $tailscale)) {
-            $tailscale = "${env:ProgramFiles(x86)}\Tailscale\tailscale.exe"
-          }
 
           if (-not (Test-Path $tailscale)) {
             throw "Tailscale executable not found."
@@ -141,10 +121,10 @@ jobs:
 
           & $tailscale ip -4
 
-      - name: Final Setup
+      - name: Show Environment Information
         shell: pwsh
         run: |
-          Write-Host "NRB Fast Client setup finished."
+          Write-Host "NRB Fast Client environment configured."
           Write-Host "Username: NRB"
           Write-Host "Password: NRB"
-          Write-Host "VS Code, Python, Git and graphics dependencies were configured."
+          Write-Host "Java, VS Code, Git and OpenGL development libraries configured."
