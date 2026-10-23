@@ -1,0 +1,116 @@
+name: NRB Fast Client Windows
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup-windows:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Development Tools
+        shell: pwsh
+        run: |
+          $packages = @(
+            "Microsoft.VisualStudioCode",
+            "Git.Git",
+            "Python.Python.3.12",
+            "Microsoft.VCRedist.2015+.x64",
+            "Tailscale.Tailscale"
+          )
+
+          foreach ($package in $packages) {
+            winget install --id $package --exact --silent `
+              --accept-package-agreements `
+              --accept-source-agreements
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "Installation failed: $package"
+            }
+          }
+
+      - name: Install C++ Build Tools
+        shell: pwsh
+        run: |
+          winget install `
+            --id Microsoft.VisualStudio.2022.BuildTools `
+            --exact --silent `
+            --accept-package-agreements `
+            --accept-source-agreements `
+            --override "--wait --quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "C++ Build Tools installation failed."
+          }
+
+      - name: Verify OpenGL
+        shell: pwsh
+        run: |
+          $opengl = "$env:WINDIR\System32\opengl32.dll"
+
+          if (Test-Path $opengl) {
+            Write-Host "OpenGL system library is available."
+          } else {
+            throw "OpenGL system library was not found."
+          }
+
+          Write-Host "Hardware acceleration depends on the GPU driver."
+
+      - name: Create NRB User
+        shell: pwsh
+        run: |
+          $username = "NRB"
+          $password = ConvertTo-SecureString "NRB" -AsPlainText -Force
+
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $username `
+              -Password $password `
+              -Description "NRB Fast Client User"
+          }
+
+          Write-Host "NRB user created or already exists."
+
+      - name: Authenticate Tailscale
+        shell: pwsh
+        env:
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
+            throw "Configure the TS_AUTHKEY repository secret."
+          }
+
+          $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          if (-not (Test-Path $tailscale)) {
+            $tailscale = "${env:ProgramFiles(x86)}\Tailscale\tailscale.exe"
+          }
+
+          if (-not (Test-Path $tailscale)) {
+            throw "Tailscale executable not found."
+          }
+
+          Start-Service Tailscale
+
+          & $tailscale up `
+            "--auth-key=$env:TS_AUTHKEY" `
+            "--hostname=nrb-fast-client"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tailscale authentication failed."
+          }
+
+          Write-Host "Tailscale IPv4 address:"
+          & $tailscale ip -4
+
+      - name: Verify Installation
+        shell: pwsh
+        run: |
+          git --version
+          python --version
+
+          Write-Host "VS Code and Windows development tools installed."
+          Write-Host "NRB Fast Client setup completed."
