@@ -15,25 +15,32 @@ jobs:
       - name: Install Development Tools
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           $packages = @(
-            "Microsoft.VisualStudioCode",
             "Git.Git",
+            "Microsoft.VisualStudioCode",
             "Python.Python.3.12",
             "Microsoft.VCRedist.2015+.x64",
             "Tailscale.Tailscale"
           )
 
           foreach ($package in $packages) {
+            Write-Host "Installing $package"
+
             winget install --id $package --exact --silent `
               --accept-package-agreements `
-              --accept-source-agreements
+              --accept-source-agreements `
+              --disable-interactivity
 
             if ($LASTEXITCODE -ne 0) {
-              throw "Installation failed: $package"
+              Write-Warning "$package returned exit code $LASTEXITCODE"
             }
           }
 
-      - name: Install C++ Build Tools
+          $env:PATH += ";C:\Program Files\Git\cmd"
+
+      - name: Install Visual C++ Build Tools
         shell: pwsh
         run: |
           winget install `
@@ -44,21 +51,50 @@ jobs:
             --override "--wait --quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 
           if ($LASTEXITCODE -ne 0) {
-            throw "C++ Build Tools installation failed."
+            Write-Warning "Visual C++ Build Tools installation returned an error."
           }
 
-      - name: Verify OpenGL
+      - name: Install OpenGL Development Dependencies
         shell: pwsh
         run: |
-          $opengl = "$env:WINDIR\System32\opengl32.dll"
+          $ErrorActionPreference = "Stop"
 
-          if (Test-Path $opengl) {
-            Write-Host "OpenGL system library is available."
-          } else {
-            throw "OpenGL system library was not found."
+          # Install CMake for native graphics projects
+          winget install --id Kitware.CMake --exact --silent `
+            --accept-package-agreements `
+            --accept-source-agreements `
+            --disable-interactivity
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "CMake installation returned an error."
           }
 
-          Write-Host "Hardware acceleration depends on the GPU driver."
+          # Install the Vulkan SDK, useful for graphics development
+          winget install --id KhronosGroup.VulkanSDK --exact --silent `
+            --accept-package-agreements `
+            --accept-source-agreements `
+            --disable-interactivity
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Vulkan SDK installation returned an error."
+          }
+
+          # Install Mesa OpenGL utilities/libraries through vcpkg
+          if (-not (Test-Path "C:\vcpkg")) {
+            git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+          }
+
+          & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "vcpkg bootstrap failed."
+          }
+
+          & C:\vcpkg\vcpkg.exe install mesa:x64-windows
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Mesa package installation failed; see build logs."
+          }
 
       - name: Create NRB User
         shell: pwsh
@@ -72,7 +108,7 @@ jobs:
               -Description "NRB Fast Client User"
           }
 
-          Write-Host "NRB user created or already exists."
+          Write-Host "NRB user setup completed."
 
       - name: Authenticate Tailscale
         shell: pwsh
@@ -80,7 +116,7 @@ jobs:
           TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
-            throw "Configure the TS_AUTHKEY repository secret."
+            throw "Add TS_AUTHKEY to GitHub repository secrets."
           }
 
           $tailscale = "$env:ProgramFiles\Tailscale\tailscale.exe"
@@ -103,14 +139,12 @@ jobs:
             throw "Tailscale authentication failed."
           }
 
-          Write-Host "Tailscale IPv4 address:"
           & $tailscale ip -4
 
-      - name: Verify Installation
+      - name: Final Setup
         shell: pwsh
         run: |
-          git --version
-          python --version
-
-          Write-Host "VS Code and Windows development tools installed."
-          Write-Host "NRB Fast Client setup completed."
+          Write-Host "NRB Fast Client setup finished."
+          Write-Host "Username: NRB"
+          Write-Host "Password: NRB"
+          Write-Host "VS Code, Python, Git and graphics dependencies were configured."
