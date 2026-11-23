@@ -1,539 +1,541 @@
 #!/bin/bash
-# ============================================
-# Discord LXC/LXD VPS Bot - Complete Setup
-# ============================================
+# ==========================================
+# DISCORD VPS HOSTING BOT - ONE CMD INSTALLER
+# ==========================================
 
-set -e
+set -Eeuo pipefail
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
-WHITE='\033[1;37m'
-BOLD='\033[1m'
-NC='\033[0m'
+APP="/opt/discord-vps-bot"
+DATA="/var/lib/discord-vps-bot"
+ENV="/etc/discord-vps-bot.env"
+USER="discordvps"
 
-echo -e "${CYAN}${BOLD}"
-echo "╔══════════════════════════════════════════╗"
-echo "║     DISCORD LXC/LXD VPS BOT SETUP       ║"
-echo "║     Container Management & Monitoring    ║"
-echo "╚══════════════════════════════════════════╝"
-echo -e "${NC}"
-
-# Check root
 if [[ $EUID -ne 0 ]]; then
-   echo -e "${RED}[!] This script must be run as root${NC}"
-   exit 1
+    echo "Run: sudo bash install.sh"
+    exit 1
 fi
 
-# Install LXD if not present
-install_lxd() {
-    if command -v lxd &>/dev/null; then
-        echo -e "${GREEN}[+] LXD already installed${NC}"
-        return
-    fi
-    
-    echo -e "${YELLOW}[*] Installing LXD/LXC...${NC}"
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -y -qq lxd lxc lxc-template debootstrap bridge-utils dnsmasq-base iptables
-    
-    # Initialize LXD
-    lxd init --auto 2>/dev/null || true
-    
-    # Create default bridge
-    lxc network create lxdbr0 ipv4.address=10.0.0.1/24 ipv4.nat=true ipv6.address=none 2>/dev/null || true
-    
-    systemctl enable lxd 2>/dev/null || true
-    systemctl start lxd 2>/dev/null || true
-    
-    echo -e "${GREEN}[+] LXD installed and initialized${NC}"
+clear
+echo "=========================================="
+echo "       DISCORD VPS HOSTING BOT"
+echo "=========================================="
+echo
+
+ask() {
+    local answer
+    read -r -p "$1 [$2]: " answer
+    echo "${answer:-$2}"
 }
 
-install_lxd
+read -r -s -p "Discord Bot Token: " TOKEN
+echo
+[[ -n "$TOKEN" ]] || exit 1
 
-# Install Python dependencies
-install_python_deps() {
-    echo -e "${YELLOW}[*] Installing Python dependencies...${NC}"
-    pip3 install --break-system-packages discord.py pyyaml requests 2>/dev/null || \
-    pip3 install discord.py pyyaml requests --break-system-packages
-    
-    echo -e "${GREEN}[+] Python dependencies installed${NC}"
-}
+GUILD=$(ask "Discord Server ID (0 = global)" "0")
+ADMINS=$(ask "Admin User IDs (comma separated)" "")
+ROLES=$(ask "Admin Role IDs (comma separated)" "")
+MAX=$(ask "Maximum VPS per customer" "2")
+CPU=$(ask "Default CPU cores" "1")
+RAM=$(ask "Default RAM in MB" "1024")
+DISK=$(ask "Default Disk in GB" "10")
+IMAGE=$(ask "Ubuntu image" "images:ubuntu/22.04")
 
-install_python_deps
+for n in "$GUILD" "$MAX" "$CPU" "$RAM" "$DISK"; do
+    [[ "$n" =~ ^[0-9]+$ ]] || {
+        echo "Invalid numeric value"
+        exit 1
+    }
+done
 
-# Create bot directory
-mkdir -p /opt/discord_lxc_bot/{cogs,utils,config}
-mkdir -p /var/log/discord_lxc_bot
-mkdir -p /etc/discord_lxc_bot
+(( MAX >= 1 && CPU >= 1 && RAM >= 256 && DISK >= 1 )) || exit 1
 
-# ============================================
-# LXD MANAGER CLASS
-# ============================================
+echo
+echo "[1/7] Installing dependencies..."
 
-cat > /opt/discord_lxc_bot/utils/lxd_manager.py << 'LXDMANAGER'
-#!/usr/bin/env python3
-"""LXD Manager - Core container operations for Discord Bot"""
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update
+apt-get install -y python3 python3-venv python3-pip snapd
+
+echo "[2/7] Installing LXD..."
+
+if ! command -v lxc >/dev/null 2>&1; then
+    snap install lxd
+fi
+
+if ! getent group lxd >/dev/null 2>&1; then
+    groupadd lxd
+fi
+
+if ! lxc info >/dev/null 2>&1; then
+    lxd init --auto
+fi
+
+echo "[3/7] Creating directories..."
+
+id "$USER" >/dev/null 2>&1 || \
+useradd --system --create-home --home-dir "$DATA" \
+--shell /usr/sbin/nologin "$USER"
+
+usermod -aG lxd "$USER"
+
+mkdir -p "$APP/bot" "$DATA"
+chown "$USER:$USER" "$DATA"
+
+echo "[4/7] Configuring bot..."
+
+cat > "$ENV" <<EOF
+DISCORD_TOKEN=$TOKEN
+GUILD_ID=$GUILD
+ADMIN_USER_IDS=$ADMINS
+ADMIN_ROLE_IDS=$ROLES
+DB_PATH=$DATA/bot.sqlite3
+LXC_BIN=/snap/bin/lxc
+DEFAULT_IMAGE=$IMAGE
+MAX_VPS_PER_USER=$MAX
+DEFAULT_VCPU=$CPU
+DEFAULT_MEMORY_MB=$RAM
+DEFAULT_DISK_GB=$DISK
+MAX_VCPU=$CPU
+MAX_MEMORY_MB=$RAM
+MAX_DISK_GB=$DISK
+EOF
+
+chmod 600 "$ENV"
+
+cat > "$APP/bot/__init__.py" <<'EOF'
+EOF
+
+cat > "$APP/bot/config.py" <<'EOF'
+import os
+
+def csv_ints(name):
+    return {
+        int(x.strip())
+        for x in os.getenv(name, "").split(",")
+        if x.strip()
+    }
+
+DISCORD_TOKEN = os.environ["DISCORD_TOKEN"]
+GUILD_ID = int(os.getenv("GUILD_ID", "0"))
+ADMIN_USER_IDS = csv_ints("ADMIN_USER_IDS")
+ADMIN_ROLE_IDS = csv_ints("ADMIN_ROLE_IDS")
+
+DB_PATH = os.getenv("DB_PATH")
+LXC_BIN = os.getenv("LXC_BIN", "lxc")
+DEFAULT_IMAGE = os.getenv("DEFAULT_IMAGE", "images:ubuntu/22.04")
+
+MAX_VPS_PER_USER = int(os.getenv("MAX_VPS_PER_USER", "2"))
+DEFAULT_VCPU = int(os.getenv("DEFAULT_VCPU", "1"))
+DEFAULT_MEMORY_MB = int(os.getenv("DEFAULT_MEMORY_MB", "1024"))
+DEFAULT_DISK_GB = int(os.getenv("DEFAULT_DISK_GB", "10"))
+EOF
+
+cat > "$APP/bot/db.py" <<'EOF'
+import sqlite3
+from pathlib import Path
+from . import config
+
+def connect():
+    Path(config.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(config.DB_PATH)
+    db.row_factory = sqlite3.Row
+    return db
+
+def init_db():
+    with connect() as db:
+        db.execute("""
+        CREATE TABLE IF NOT EXISTS vps (
+            name TEXT PRIMARY KEY,
+            owner_id INTEGER NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+
+def add_vps(name, owner):
+    with connect() as db:
+        db.execute(
+            "INSERT INTO vps(name, owner_id) VALUES(?, ?)",
+            (name, owner)
+        )
+
+def remove_vps(name):
+    with connect() as db:
+        db.execute("DELETE FROM vps WHERE name=?", (name,))
+
+def owner_of(name):
+    with connect() as db:
+        row = db.execute(
+            "SELECT owner_id FROM vps WHERE name=?", (name,)
+        ).fetchone()
+        return int(row["owner_id"]) if row else None
+
+def count_for_user(owner):
+    with connect() as db:
+        return db.execute(
+            "SELECT COUNT(*) FROM vps WHERE owner_id=?", (owner,)
+        ).fetchone()[0]
+
+def list_for_user(owner):
+    with connect() as db:
+        return db.execute(
+            "SELECT name FROM vps WHERE owner_id=?", (owner,)
+        ).fetchall()
+EOF
+
+cat > "$APP/bot/lxd.py" <<'EOF'
 import subprocess
 import json
-import os
-import time
-import yaml
-from datetime import datetime
+import re
+from . import config
 
-class LXDManager:
-    def __init__(self):
-        self.ensure_lxd_ready()
-    
-    def ensure_lxd_ready(self):
-        """Ensure LXD daemon is running"""
-        try:
-            result = subprocess.run(['lxc', 'list', '--mode', 'json'], 
-                                  capture_output=True, text=True, timeout=10)
-            if result.returncode != 0:
-                subprocess.run(['lxd', 'start'], capture_output=True, timeout=5)
-                time.sleep(2)
-        except Exception:
-            pass
-    
-    def list_containers(self):
-        """List all LXD containers"""
-        try:
-            result = subprocess.run(['lxc', 'list', '--mode', 'json'], 
-                                  capture_output=True, text=True, timeout=15)
-            if result.returncode == 0 and result.stdout.strip():
-                return json.loads(result.stdout)
-        except Exception as e:
-            print(f"Error listing containers: {e}")
-        return []
-    
-    def get_container_info(self, name):
-        """Get detailed container information"""
-        try:
-            result = subprocess.run(['lxc', 'info', name, '--format', 'json'], 
-                                  capture_output=True, text=True, timeout=10)
-            if result.returncode == 0:
-                return json.loads(result.stdout)
-        except Exception as e:
-            print(f"Error getting container info: {e}")
-        return None
-    
-    def start_container(self, name):
-        """Start a container"""
-        try:
-            result = subprocess.run(['lxc', 'start', name], 
-                                  capture_output=True, text=True, timeout=30)
-            return result.returncode == 0, result.stdout, result.stderr
-        except Exception as e:
-            return False, "", str(e)
-    
-    def stop_container(self, name, timeout=30):
-        """Stop a container"""
-        try:
-            result = subprocess.run(['lxc', 'stop', name, '--timeout', str(timeout)], 
-                                  capture_output=True, text=True, timeout=35)
-            return result.returncode == 0, result.stdout, result.stderr
-        except Exception as e:
-            return False, "", str(e)
-    
-    def restart_container(self, name):
-        """Restart a container"""
-        success_stop, _, _ = self.stop_container(name, timeout=10)
-        if success_stop:
-            success_start, _, _ = self.start_container(name)
-            return success_start
-        return False
-    
-    def delete_container(self, name, remove_storage=False):
-        """Delete a container"""
-        flag = '--remove-storage' if remove_storage else ''
-        try:
-            result = subprocess.run(['lxc', 'delete', name, flag], 
-                                  capture_output=True, text=True, timeout=30)
-            return result.returncode == 0
-        except Exception:
-            return False
-    
-    def execute_in_container(self, name, command, timeout=30):
-        """Execute command inside container"""
-        try:
-            result = subprocess.run(['lxc', 'exec', name, '--'] + command.split(), 
-                                  capture_output=True, text=True, timeout=timeout)
-            return result.returncode, result.stdout, result.stderr
-        except Exception as e:
-            return -1, "", str(e)
-    
-    def create_container(self, name, image='ubuntu', release='22.04', 
-                         architecture='amd64', profile='default', 
-                         resources=None):
-        """Create a new container"""
-        try:
-            # Check if container already exists
-            containers = self.list_containers()
-            container_names = [c.get('name') for c in containers if c.get('status')]
-            
-            if name in container_names:
-                return False, f"Container {name} already exists", ""
-            
-            # Create container command
-            if image.startswith('~') or '/' in image:
-                cmd = ['lxc', 'launch', image, name]
-            else:
-                cmd = ['lxc', 'launch', f'{image}:{release}/{architecture}', name]
-            
-            # Add profile if specified
-            if profile and profile != 'default':
-                cmd.extend(['--profile', profile])
-            
-            # Add resources if specified
-            if resources:
-                for res_key, res_val in resources.items():
-                    cmd.extend(['--', f'{res_key}={res_val}'])
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            
-            if result.returncode == 0:
-                time.sleep(3)
-                return True, f"Container {name} created successfully", ""
-            else:
-                return False, "", result.stderr
-                
-        except Exception as e:
-            return False, "", str(e)
-    
-    def get_container_status(self, name):
-        """Get container status"""
-        try:
-            result = subprocess.run(['lxc', 'list', '--columns', 'name,status', '--filter', name], 
-                                  capture_output=True, text=True, timeout=10)
-            if result.returncode == 0 and result.stdout.strip():
-                lines = result.stdout.strip().split('\n')
-                if len(lines) > 1:
-                    parts = lines[1].split()
-                    if len(parts) >= 2:
-                        return parts[1]
-        except Exception:
-            pass
-        return "unknown"
-    
-    def get_system_resources(self):
-        """Get system resource usage"""
-        resources = {}
-        
-        # CPU usage
-        try:
-            cpu_result = subprocess.run(['top', '-bn1'], capture_output=True, text=True, timeout=5)
-            cpu_line = cpu_result.stdout.split('\n')[1] if cpu_result.stdout else ""
-            if cpu_line:
-                cpu_parts = cpu_line.split()
-                if len(cpu_parts) > 4:
-                    resources['cpu_usage'] = cpu_parts[4]
-                else:
-                    resources['cpu_usage'] = "0%"
-            else:
-                resources['cpu_usage'] = "0%"
-        except:
-            resources['cpu_usage'] = "0%"
-        
-        # Memory usage
-        try:
-            mem_result = subprocess.run(['free', '-m'], capture_output=True, text=True, timeout=5)
-            mem_parts = mem_result.stdout.split('\n')[1].split() if mem_result.stdout else []
-            if len(mem_parts) >= 2:
-                mem_total = mem_parts[1]
-                mem_used = mem_parts[2]
-                mem_percent = round(int(mem_used) * 100 / int(mem_total)) if mem_total.isdigit() else "0"
-                resources['memory_usage'] = f"{mem_percent}%"
-                resources['memory_total'] = f"{int(mem_total) // 1024}GB"
-                resources['memory_used'] = f"{int(mem_used) // 1024}GB"
-            else:
-                resources['memory_usage'] = "0%"
-        except:
-            resources['memory_usage'] = "0%"
-        
-        # Disk usage
-        try:
-            disk_result = subprocess.run(['df', '/'], capture_output=True, text=True, timeout=5)
-            disk_parts = disk_result.stdout.split('\n')[1].split() if disk_result.stdout else []
-            if len(disk_parts) >= 5:
-                resources['disk_usage'] = disk_parts[4]
-            else:
-                resources['disk_usage'] = "0%"
-        except:
-            resources['disk_usage'] = "0%"
-        
-        return resources
-    
-    def list_images(self):
-        """List available LXD images"""
-        try:
-            result = subprocess.run(['lxc', 'image', 'list', '--format', 'json'], 
-                                  capture_output=True, text=True, timeout=15)
-            if result.returncode == 0:
-                return json.loads(result.stdout)
-        except:
-            pass
-        return []
-    
-    def create_snapshot(self, name, snapshot_name=None):
-        """Create container snapshot"""
-        if not snapshot_name:
-            snapshot_name = f"auto-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        
-        try:
-            result = subprocess.run(['lxc', 'snapshot', 'create', name, snapshot_name], 
-                                  capture_output=True, text=True, timeout=30)
-            return result.returncode == 0, snapshot_name
-        except Exception:
-            return False, snapshot_name
-    
-    def restore_snapshot(self, name, snapshot_name):
-        """Restore container snapshot"""
-        try:
-            result = subprocess.run(['lxc', 'restore', name, snapshot_name], 
-                                  capture_output=True, text=True, timeout=30)
-            return result.returncode == 0
-        except Exception:
-            return False
-    
-    def list_snapshots(self, name):
-        """List container snapshots"""
-        try:
-            result = subprocess.run(['lxc', 'snapshot', 'list', name], 
-                                  capture_output=True, text=True, timeout=15)
-            if result.returncode == 0:
-                lines = result.stdout.strip().split('\n')
-                snapshots = []
-                for line in lines[2:]:  # Skip header lines
-                    if line.strip():
-                        parts = line.split()
-                        if len(parts) >= 1:
-                            snapshots.append(parts[0])
-                return snapshots
-        except:
-            pass
-        return []
-    
-    def copy_container(self, source, destination):
-        """Copy container to new name"""
-        try:
-            result = subprocess.run(['lxc', 'copy', source, destination], 
-                                  capture_output=True, text=True, timeout=60)
-            return result.returncode == 0
-        except Exception:
-            return False
-    
-    def migrate_container(self, name, target_host):
-        """Migrate container to another host"""
-        try:
-            result = subprocess.run(['lxc', 'move', name, f"{target_host}:{name}"], 
-                                  capture_output=True, text=True, timeout=120)
-            return result.returncode == 0
-        except Exception:
-            return False
+class LXD:
 
-LXDMANAGER
-chmod +x /opt/discord_lxc_bot/utils/lxd_manager.py
-echo -e "${GREEN}[+] LXD Manager created${NC}"
+    def run(self, *args, timeout=90):
+        p = subprocess.run(
+            [config.LXC_BIN, *map(str, args)],
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
 
-# ============================================
-# DISCORD BOT MAIN FILE
-# ============================================
+        if p.returncode:
+            raise RuntimeError((p.stderr or p.stdout)[-1000:])
 
-cat > /opt/discord_lxc_bot/bot.py << 'DISCORDBOT'
-#!/usr/bin/env python3
-"""Discord LXC/LXD VPS Bot - Main Bot File"""
+        return p.stdout
+
+    def validate(self, name):
+        if not re.fullmatch(r"[a-z][a-z0-9-]{2,29}", name):
+            raise ValueError("Invalid VPS name")
+
+    def list(self):
+        return json.loads(
+            self.run("list", "--format", "json")
+        )
+
+    def launch(self, name):
+        self.validate(name)
+
+        if any(x["name"] == name for x in self.list()):
+            raise ValueError("VPS already exists")
+
+        self.run(
+            "launch", config.DEFAULT_IMAGE, name,
+            timeout=180
+        )
+
+        try:
+            self.run("config", "set", name,
+                     "limits.cpu", config.DEFAULT_VCPU)
+
+            self.run("config", "set", name,
+                     "limits.memory",
+                     f"{config.DEFAULT_MEMORY_MB}MB")
+
+            self.run("config", "device", "override",
+                     name, "root",
+                     f"size={config.DEFAULT_DISK_GB}GB")
+
+        except Exception:
+            try:
+                self.run("delete", name, "--force")
+            except Exception:
+                pass
+            raise
+
+    def action(self, action, name):
+        self.validate(name)
+
+        if action == "delete":
+            return self.run("delete", name, "--force")
+
+        if action == "restart":
+            return self.run("restart", name)
+
+        if action == "start":
+            return self.run("start", name)
+
+        if action == "stop":
+            return self.run("stop", name)
+
+        raise ValueError("Invalid action")
+
+    def details(self, name):
+        self.validate(name)
+
+        data = json.loads(
+            self.run("info", name, "--format", "json")
+        )
+
+        return data.get("state", {})
+EOF
+
+cat > "$APP/bot/main.py" <<'EOF'
+import asyncio
+import logging
 import discord
+
+from discord import app_commands
 from discord.ext import commands
-import os
-import json
-import time
-from datetime import datetime
-import sys
-sys.path.insert(0, '/opt/discord_lxc_bot/utils')
-from lxd_manager import LXDManager
 
-# Bot configuration
-intents = discord.Intents.default()
-intents.message_content = True
-intents.reactions = True
-intents.members = True
+from . import config, db
+from .lxd import LXD
 
-bot = commands.Bot(command_prefix='!', intents=intents)
-manager = LXDManager()
+logging.basicConfig(level=logging.INFO)
 
-# Bot configuration
-BOT_CONFIG = {
-    'admin_roles': ['LXD Admin', 'Admin', 'Administrator'],
-    'bot_color': 0x00ff00,
-    'max_output_length': 2000
-}
+bot = commands.Bot(
+    command_prefix="!",
+    intents=discord.Intents.default()
+)
 
-def has_admin_role(ctx):
-    """Check if user has admin role"""
-    if not ctx.author.roles:
-        return False
-    user_roles = [role.name for role in ctx.author.roles]
-    return any(role in user_roles for role in BOT_CONFIG['admin_roles'])
+lxd = LXD()
 
-def format_container_info(container):
-    """Format container information for Discord embed"""
-    name = container.get('name', 'unknown')
-    status = container.get('status', 'unknown')
-    state = container.get('state', 'stopped')
-    
-    # Get IP addresses
-    ips = []
-    devices = container.get('devices', {})
-    if 'eth0' in devices:
-        addresses = devices['eth0'].get('addresses', [])
-        for addr in addresses:
-            if addr.get('type') == 'physical':
-                ips.append(addr.get('address', ''))
-    
-    ip_str = ', '.join(ips[:2]) if ips else 'No IP'
-    
-    # Get resources
-    cpu_usage = container.get('cpu', {}).get('usage', {}).get('total', 0) / 1e9
-    memory_usage = container.get('memory', {}).get('usage', {}).get('total', 0) / 1024 / 1024
-    
-    # Status emoji
-    status_emoji = "🟢" if state == "Running" else "🔴" if state == "Stopped" else "🟡"
-    
-    embed = discord.Embed(
-        title=f"{status_emoji} {name}",
-        color=0x00ff00 if state == "Running" else 0xff0000
+def admin(interaction):
+    if interaction.user.id in config.ADMIN_USER_IDS:
+        return True
+
+    return any(
+        role.id in config.ADMIN_ROLE_IDS
+        for role in getattr(interaction.user, "roles", [])
     )
-    embed.add_field(name="Status", value=f"`{status}`", inline=True)
-    embed.add_field(name="State", value=f"`{state}`", inline=True)
-    embed.add_field(name="IP Address", value=f"`{ip_str}`", inline=True)
-    embed.add_field(name="CPU Usage", value=f"`{cpu_usage:.2f}s`", inline=True)
-    embed.add_field(name="Memory Usage", value=f"`{memory_usage:.2f}MB`", inline=True)
-    
-    return embed
+
+def permitted(interaction, name):
+    return admin(interaction) or db.owner_of(name) == interaction.user.id
+
+async def run(fn, *args):
+    return await asyncio.to_thread(fn, *args)
+
+async def reply(interaction, message):
+    if interaction.response.is_done():
+        await interaction.followup.send(
+            message, ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            message, ephemeral=True
+        )
 
 @bot.event
 async def on_ready():
-    print(f'🤖 Logged in as {bot.user.name} (ID: {bot.user.id})')
-    print(f'📊 Connected to {len(bot.guilds)} guild(s)')
-    await bot.change_presence(
-        activity=discord.Game(name="!help for LXD commands"),
-        status=discord.Status.online
-    )
+    print(f"Bot online: {bot.user}")
 
-@bot.slash_command(name="lxd-status", description="Show LXD system status")
-async def lxd_status(ctx):
-    """Show system and container status"""
-    if not has_admin_role(ctx):
-        embed = discord.Embed(
-            title="❌ Access Denied",
-            description="You need the Admin role to use this command.",
-            color=discord.Color.red()
-        )
-        await ctx.respond(embed=embed)
-        return
-    
-    containers = manager.list_containers()
-    resources = manager.get_system_resources()
-    
-    running = sum(1 for c in containers if c.get('state') == 'Running')
-    total = len(containers)
-    
-    embed = discord.Embed(
-        title="📊 LXD System Status",
-        color=discord.Color.blue()
-    )
-    embed.add_field(name="🔥 CPU Usage", value=f"`{resources['cpu_usage']}`", inline=True)
-    embed.add_field(name="💾 Memory Usage", value=f"`{resources['memory_usage']}`", inline=True)
-    embed.add_field(name="💿 Disk Usage", value=f"`{resources['disk_usage']}`", inline=True)
-    embed.add_field(name="🖥️ Containers", value=f"`{running}/{total}` running", inline=True)
-    embed.set_footer(text=f"LXD Bot • {datetime.now().strftime('%H:%M:%S')}")
-    
-    await ctx.respond(embed=embed)
+    try:
+        if config.GUILD_ID:
+            guild = discord.Object(id=config.GUILD_ID)
+            bot.tree.copy_global_to(guild=guild)
+            await bot.tree.sync(guild=guild)
+        else:
+            await bot.tree.sync()
+    except Exception:
+        logging.exception("Command sync failed")
 
-@bot.slash_command(name="lxd-list", description="List all LXD containers")
-async def lxd_list(ctx):
-    """List all containers"""
-    if not has_admin_role(ctx):
-        embed = discord.Embed(
-            title="❌ Access Denied",
-            description="You need the Admin role to use this command.",
-            color=discord.Color.red()
-        )
-        await ctx.respond(embed=embed)
-        return
-    
-    containers = manager.list_containers()
-    
-    if not containers:
-        embed = discord.Embed(
-            title="📦 Container List",
-            description="📭 No LXD containers found.",
-            color=discord.Color.blue()
-        )
-        await ctx.respond(embed=embed)
-        return
-    
-    embed = discord.Embed(
-        title=f"📦 Container List ({len(containers)} total)",
-        color=discord.Color.blue()
-    )
-    
-    for i, container in enumerate(containers, 1):
-        name = container.get('name', 'unknown')
-        status = container.get('status', 'unknown')
-        state = container.get('state', 'stopped')
-        
-        emoji = "🟢" if state == "Running" else "🔴" if state == "Stopped" else "🟡"
-        
-        embed.add_field(
-            name=f"{emoji} {name}",
-            value=f"Status: `{status}`",
-            inline=False
-        )
-    
-    embed.set_footer(text=f"Total: {len(containers)} containers")
-    await ctx.respond(embed=embed)
+@bot.tree.command(
+    name="vps-create",
+    description="Create your own VPS"
+)
+async def create(interaction: discord.Interaction, name: str):
+    name = name.lower().strip()
 
-@bot.slash_command(name="lxd-start", description="Start an LXD container")
-async def lxd_start(ctx, container_name: str):
-    """Start a container"""
-    if not has_admin_role(ctx):
-        embed = discord.Embed(
-            title="❌ Access Denied",
-            description="You need the Admin role to use this command.",
-            color=discord.Color.red()
+    try:
+        lxd.validate(name)
+
+        if (
+            db.count_for_user(interaction.user.id)
+            >= config.MAX_VPS_PER_USER
+            and not admin(interaction)
+        ):
+            return await reply(interaction, "VPS limit reached.")
+
+        await interaction.response.defer(ephemeral=True)
+
+        await run(lxd.launch, name)
+
+        try:
+            db.add_vps(name, interaction.user.id)
+        except Exception:
+            await run(lxd.action, "delete", name)
+            raise
+
+        await interaction.followup.send(
+            f"✅ VPS `{name}` created!\n"
+            f"CPU: {config.DEFAULT_VCPU}\n"
+            f"RAM: {config.DEFAULT_MEMORY_MB} MB\n"
+            f"Disk: {config.DEFAULT_DISK_GB} GB\n"
+            "Note: container IP is not automatically public.",
+            ephemeral=True
         )
-        await ctx.respond(embed=embed)
-        return
-    
-    # Check if container exists
-    containers = manager.list_containers()
-    container_names = [c.get('name') for c in containers]
-    
-    if container_name not in container_names:
-        embed = discord.Embed(
-            title="❌ Container Not Found",
-            description=f"Container `{container_name}` not found!",
-            color=discord.Color.red()
-        )
-        await ctx.respond(embed=embed)
-        return
-    
-    success, stdout, stderr = manager.start_container(container_name)
-    
-    if success:
-        embed = discord.Embed(
-            title="▶️ Container Started",
-            description=f"Container `{container_name}` started successfully!",
-            color=discord.Color.green()
-        )
-        await ctx.respond(embed=embed)
+
+    except Exception as e:
+        await reply(interaction, f"❌ {str(e)[:700]}")
+
+@bot.tree.command(name="vps-list", description="List your VPS")
+async def listing(interaction: discord.Interaction):
+
+    rows = db.list_for_user(interaction.user.id)
+
+    if admin(interaction):
+        rows = await run(lxd.list)
+        names = [x["name"] for x in rows]
     else:
-        embed = discord.Embed(
-            title="❌ Failed to Start",
-            description=f"Error starting container:\n
+        names = [x["name"] for x in rows]
+
+    await reply(
+        interaction,
+        "\n".join(names) if names else "No VPS found."
+    )
+
+async def manage(interaction, action, name):
+    name = name.lower().strip()
+
+    try:
+        lxd.validate(name)
+
+        if not permitted(interaction, name):
+            return await reply(interaction, "Access denied.")
+
+        if db.owner_of(name) is None and not admin(interaction):
+            return await reply(interaction, "VPS ownership not found.")
+
+        await interaction.response.defer(ephemeral=True)
+
+        await run(lxd.action, action, name)
+
+        if action == "delete":
+            db.remove_vps(name)
+
+        await interaction.followup.send(
+            f"✅ VPS {name}: {action} successful.",
+            ephemeral=True
+        )
+
+    except Exception as e:
+        await reply(interaction, f"❌ {str(e)[:700]}")
+
+def make_callback(action):
+    async def callback(interaction: discord.Interaction, name: str):
+        await manage(interaction, action, name)
+    return callback
+
+for action in ("start", "stop", "restart", "delete"):
+    bot.tree.add_command(
+        app_commands.Command(
+            name=f"vps-{action}",
+            description=f"{action.capitalize()} your VPS",
+            callback=make_callback(action)
+        )
+    )
+
+@bot.tree.command(name="vps-info", description="Show VPS information")
+async def info(interaction: discord.Interaction, name: str):
+
+    if not permitted(interaction, name):
+        return await reply(interaction, "Access denied.")
+
+    try:
+        data = await run(lxd.details, name)
+
+        await reply(
+            interaction,
+            f"VPS: {name}\n"
+            f"Status: {data.get('status', 'Unknown')}"
+        )
+
+    except Exception as e:
+        await reply(interaction, f"❌ {str(e)[:700]}")
+
+@bot.tree.command(
+    name="vps-admin-list",
+    description="Administrator: list all VPS"
+)
+async def admin_list(interaction: discord.Interaction):
+
+    if not admin(interaction):
+        return await reply(interaction, "Admin only.")
+
+    containers = await run(lxd.list)
+
+    names = [
+        f"{x['name']} - {x.get('status', 'Unknown')}"
+        for x in containers
+    ]
+
+    await reply(
+        interaction,
+        "\n".join(names) if names else "No containers."
+    )
+
+def main():
+    db.init_db()
+    bot.run(config.DISCORD_TOKEN)
+
+if __name__ == "__main__":
+    main()
+EOF
+
+echo "[5/7] Installing Python packages..."
+
+python3 -m venv "$APP/venv"
+
+"$APP/venv/bin/pip" install --upgrade pip
+"$APP/venv/bin/pip" install "discord.py>=2.4,<3"
+
+chown -R root:root "$APP"
+chmod -R go-w "$APP"
+chown -R "$USER:$USER" "$DATA"
+
+echo "[6/7] Creating systemd service..."
+
+cat > /etc/systemd/system/discord-vps-bot.service <<EOF
+[Unit]
+Description=Discord VPS Hosting Bot
+After=network-online.target snap.lxd.daemon.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$USER
+Group=$USER
+SupplementaryGroups=lxd
+WorkingDirectory=$APP
+EnvironmentFile=$ENV
+ExecStart=$APP/venv/bin/python -m bot.main
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=$DATA
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "[7/7] Starting Discord bot..."
+
+systemctl daemon-reload
+systemctl enable --now discord-vps-bot
+
+echo
+echo "=========================================="
+echo "       INSTALLATION COMPLETE!"
+echo "=========================================="
+echo
+echo "Discord commands:"
+echo "/vps-create"
+echo "/vps-list"
+echo "/vps-info"
+echo "/vps-start"
+echo "/vps-stop"
+echo "/vps-restart"
+echo "/vps-delete"
+echo "/vps-admin-list"
+echo
+echo "Check status:"
+echo "systemctl status discord-vps-bot"
+echo
+echo "View logs:"
+echo "journalctl -u discord-vps-bot -f"
+echo
+echo "IMPORTANT: Public IP and SSH networking"
+echo "must be configured separately."
